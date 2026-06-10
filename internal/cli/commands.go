@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tlrmchlsmth/claudectx/internal/adopt"
 	"github.com/tlrmchlsmth/claudectx/internal/fsx"
 	"github.com/tlrmchlsmth/claudectx/internal/linker"
 	"github.com/tlrmchlsmth/claudectx/internal/procs"
@@ -444,6 +443,3 @@ func (a *App) pushContextClaudeJSON(name string) error {
 	}
 	return err
 }
-
-// Ensure adopt import is used even before translate/doctor land.
-var _ = adopt.DefaultContext

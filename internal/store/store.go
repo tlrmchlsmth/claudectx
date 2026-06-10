@@ -37,7 +37,14 @@ func ValidateName(name string) error {
 }
 
 // Journal records an in-flight multi-step operation so an interrupted run can
-// be rolled forward by the next invocation.
+// be rolled forward by the next invocation. Every claudectx command checks
+// for a non-nil journal at startup and finishes the recorded operation before
+// doing anything else.
+//
+// Contract for journaled operations: each step must be idempotent (recovery
+// re-runs from the journaled Step, possibly repeating work that already
+// happened) and recovery must reconcile by observing disk state, not by
+// trusting memory of what was done.
 type Journal struct {
 	Op        string `json:"op"`   // "init" | "switch"
 	From      string `json:"from"` // switch only

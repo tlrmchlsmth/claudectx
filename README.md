@@ -75,9 +75,25 @@ where Claude Code itself writes it under `CLAUDE_CONFIG_DIR`, so global mode
 and terminal pinning share one canonical file.
 
 Switching atomically repoints both symlinks and copy-swaps `~/.claude.json`
-(MCP servers, per-project state). Every switch is journaled in
-`~/.claudectx/state.json`; if a switch is interrupted, the next claudectx
-command rolls it forward to a consistent state automatically.
+(MCP servers, per-project state).
+
+### Crash recovery
+
+Every multi-step operation writes a journal entry to
+`~/.claudectx/state.json` before each step. If a switch dies halfway —
+power loss, ^C, a failing `security` call — the **next claudectx command of
+any kind** notices the journal and rolls the operation *forward* to its
+target before doing anything else. Steps are ordered so this is always safe:
+
+1. capture the outgoing context's token and `claude.json` (nothing moved yet —
+   a failure here aborts cleanly),
+2. repoint the symlinks (the commit point),
+3. install the incoming context's `claude.json` and token (pure replays —
+   they only read already-captured state).
+
+Recovery reconciles by looking at where the links actually point, not by
+trusting what the journal says happened, so even a crash *during recovery*
+converges. `claudectx doctor` shows any pending journal.
 
 ### Tokens
 
@@ -211,3 +227,7 @@ just build    # bin/claudectx
 
 Everything is testable against a throwaway root: the env vars above redirect
 every path, and the keychain sits behind an interface with a fake.
+
+## License
+
+[MIT](LICENSE)

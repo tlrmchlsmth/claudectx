@@ -17,6 +17,22 @@ import (
 )
 
 // Step names recorded in the journal, in execution order.
+//
+// The order is what makes an interrupted switch recoverable:
+//
+//  1. stash / claude_json_out capture the OUTGOING context's volatile state
+//     (keychain token, live ~/.claude.json). Nothing has moved yet, so a
+//     failure here aborts cleanly with the system untouched.
+//  2. links is the commit point: both symlinks repoint to the target. Each
+//     repoint is itself atomic (rename(2)), but a crash between the two
+//     leaves a mixed state — which is fine, because recovery always rolls
+//     FORWARD to the journaled target, never back.
+//  3. claude_json_in / keychain_in install the INCOMING context's state.
+//     They only read from the (already captured) target context, so they
+//     can be replayed any number of times.
+//
+// Every step must stay idempotent: recovery re-runs from the journaled step,
+// and two racing recoveries must converge on the same end state.
 const (
 	StepStash         = "stash"
 	StepClaudeJSONOut = "claude_json_out"
