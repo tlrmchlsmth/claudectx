@@ -1,5 +1,7 @@
 # claudectx
 
+[![CI](https://github.com/tlrmchlsmth/claudectx/actions/workflows/ci.yml/badge.svg)](https://github.com/tlrmchlsmth/claudectx/actions/workflows/ci.yml)
+
 **kubectx for your AI coding agents.** Switch between named *contexts* — bundled
 Claude Code + Codex CLI state (settings, auth tokens, skills, instructions,
 MCP servers) — with one command. Translate configuration between the two tools.
