@@ -1,0 +1,153 @@
+# claudectx
+
+**kubectx for your AI coding agents.** Switch between named *contexts* — bundled
+Claude Code + Codex CLI state (settings, auth tokens, skills, instructions,
+MCP servers) — with one command. Translate configuration between the two tools.
+
+```console
+$ claudectx create client-x --empty
+$ claudectx client-x
+Switched to "client-x" (claude ✓ codex ✓ keychain ✓)
+$ claudectx -            # back to the previous context
+$ claudectx
+* default
+  client-x
+```
+
+## Install
+
+```sh
+go install github.com/tlrmchlsmth/claudectx@latest   # or: just install
+```
+
+Then adopt your existing state:
+
+```sh
+claudectx init
+```
+
+`init` moves `~/.claude` and `~/.codex` into `~/.claudectx/contexts/default/`
+and symlinks them back. Nothing is deleted; `~/.claude.json` is backed up to
+`~/.claudectx/backups/` first. If either path is already a symlink you manage
+yourself (e.g. into dotfiles), claudectx refuses to touch it and tells you why.
+
+## Terminal-scoped contexts
+
+Global switching changes every terminal at once (it's a symlink). To pin just
+**one terminal** to a context, use env pinning — both tools natively honor
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME`:
+
+```sh
+eval "$(claudectx env work)"     # this terminal now uses "work"
+claudectx shell work             # or: a subshell pinned to "work" (exit to leave)
+eval "$(claudectx env --unset)"  # follow the global context again
+```
+
+Add `eval "$(claudectx shell-init)"` to your shell rc for the short form:
+
+```sh
+cx work    # pin this terminal
+cx off     # unpin
+cx         # list
+```
+
+`claudectx current` and `list` are pin-aware. One caveat: the macOS Keychain
+is per-user, not per-terminal, so env-pinned terminals share whichever Claude
+login is globally active — pinning isolates settings, skills, MCP servers,
+and history, not the OAuth token. (Codex `auth.json` *is* per-context even
+when pinned.) Avoid running global switches while a pinned terminal actively
+uses the same context — both write the same `.claude.json`.
+
+## How it works
+
+```
+~/.claude        -> ~/.claudectx/contexts/<current>/claude     (symlink)
+~/.codex         -> ~/.claudectx/contexts/<current>/codex      (symlink)
+~/.claude.json   <- copy-swapped on every switch with the context's
+                    claude/.claude.json (not symlinked: Claude Code rewrites
+                    it with rename(2), which would destroy a symlink)
+```
+
+The context copy lives at `contexts/<name>/claude/.claude.json` — exactly
+where Claude Code itself writes it under `CLAUDE_CONFIG_DIR`, so global mode
+and terminal pinning share one canonical file.
+
+Switching atomically repoints both symlinks and copy-swaps `~/.claude.json`
+(MCP servers, per-project state). Every switch is journaled in
+`~/.claudectx/state.json`; if a switch is interrupted, the next claudectx
+command rolls it forward to a consistent state automatically.
+
+### Tokens
+
+Each context carries its own logins:
+
+- **Codex**: `auth.json` lives inside the symlinked dir — travels automatically.
+- **Claude Code (macOS)**: the OAuth token lives in the Keychain. On switch,
+  claudectx stashes it into the outgoing context
+  (`contexts/<name>/secrets/`, mode 0600) and restores the incoming context's
+  token. A context with no stored login gets the keychain item *deleted*, so
+  tokens never leak between contexts; just run `claude` and log in once.
+- **Claude Code (Linux)**: `~/.claude/.credentials.json` travels with the dir.
+
+Disable keychain handling with `CLAUDECTX_NO_KEYCHAIN=1`.
+Tokens are never copied by `create --from`, never printed, and never passed
+as command-line arguments.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `claudectx` | list contexts (current marked) |
+| `claudectx <name>` / `claudectx -` | switch / switch to previous |
+| `claudectx create <name> [--from <ctx>\|--empty]` | new context (secrets never copied) |
+| `claudectx delete <name>` | confirm, then move to `backups/` (never `rm -rf`) |
+| `claudectx rename <old> <new> [--force]` | rename (relinks if active; confirms if agents are running) |
+| `eval "$(claudectx env <name>)"` / `claudectx shell <name>` | pin one terminal to a context |
+| `claudectx show [name] [--json]` | settings, skills, MCP servers, token presence |
+| `claudectx translate <direction>` | convert config between the tools (below) |
+| `claudectx doctor [--fix]` | verify symlinks, perms, state consistency |
+
+## Translation
+
+```sh
+claudectx translate claude-to-codex --dry-run
+claudectx translate codex-to-claude --only mcp,skills
+```
+
+Directions: `claude-to-codex`, `codex-to-claude`. Operates inside a context
+(default: current; `--context <name>` for any other) and prints a report of
+everything that was translated, skipped, or **lost**:
+
+| Artifact | Claude | Codex | Fidelity |
+|---|---|---|---|
+| Instructions | `CLAUDE.md` | `AGENTS.md` | `@file` imports are inlined (Codex has no imports; `--no-inline-imports` to keep verbatim) |
+| Skills | `skills/*/SKILL.md` | `skills/*/SKILL.md` | same Agent Skills standard — copied; Claude-only frontmatter (`allowed-tools`, …) kept with a warning |
+| MCP servers | `mcpServers` in `~/.claude.json` | `[mcp_servers.*]` in `config.toml` | stdio servers map 1:1; http/sse reported with a paste-ready snippet |
+| Permissions | `permissions.defaultMode` | `approval_policy` + `sandbox_mode` | mode maps; allow/deny rule lists have no Codex equivalent (reported as lost with counts) |
+| Models | `model` | `model` | never translated across vendors |
+
+Existing destination files are merged, not clobbered: `config.toml` edits are
+spliced around your comments and re-validated before writing; `settings.json`
+/ `claude.json` merges only touch the relevant keys. Conflicts skip unless
+`--force`. A symlinked `CLAUDE.md`/`AGENTS.md` destination is never overwritten.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CLAUDECTX_HOME` | `~/.claudectx` | state root |
+| `CLAUDECTX_CLAUDE_DIR` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | managed Claude dir |
+| `CLAUDECTX_CODEX_DIR` | `$CODEX_HOME` or `~/.codex` | managed Codex dir |
+| `CLAUDECTX_CLAUDE_JSON` | `~/.claude.json` | copy-swapped Claude state file |
+| `CLAUDECTX_NO_KEYCHAIN` | unset | disable macOS Keychain handling |
+
+## Development
+
+```sh
+just test     # go test ./...
+just lint     # go vet
+just build    # bin/claudectx
+```
+
+Everything is testable against a throwaway root: the env vars above redirect
+every path, and the keychain sits behind an interface with a fake.
