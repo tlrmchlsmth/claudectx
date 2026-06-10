@@ -7,7 +7,7 @@ Claude Code + Codex CLI state (settings, auth tokens, skills, instructions,
 MCP servers) — with one command. Translate configuration between the two tools.
 
 ```console
-$ claudectx create client-x --empty
+$ claudectx create client-x
 $ claudectx client-x
 Switched to "client-x" (claude ✓ codex ✓ keychain ✓)
 $ claudectx -            # back to the previous context
@@ -122,7 +122,7 @@ passed as command-line arguments.
 |---|---|
 | `claudectx` | list contexts (current marked) |
 | `claudectx <name>` / `claudectx -` | switch / switch to previous |
-| `claudectx create <name> [--from <ctx>\|--empty]` | new context (secrets never copied) |
+| `claudectx create <name> [--from [<ctx>]]` | new empty context; `--from <ctx>` clones one instead (never its credentials) |
 | `claudectx delete <name>` | confirm, then move to `backups/` (never `rm -rf`) |
 | `claudectx rename <old> <new> [--force]` | rename (relinks if active; confirms if agents are running) |
 | `eval "$(claudectx env <name>)"` / `claudectx shell <name>` | pin one terminal to a context |

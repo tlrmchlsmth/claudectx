@@ -246,6 +246,15 @@ func (a *App) cmdCreate(args []string) error {
 	if err != nil {
 		return err
 	}
+	// --from is opt-in cloning; the default is an empty context. Detect
+	// whether --from was given at all, since `--from` with no value means
+	// "from the current context".
+	fromGiven := false
+	for _, arg := range args {
+		if arg == "--from" || strings.HasPrefix(arg, "--from=") {
+			fromGiven = true
+		}
+	}
 	from, args := flagValue(args, "--from")
 	empty := hasFlag(args, "--empty")
 	var name string
@@ -256,7 +265,7 @@ func (a *App) cmdCreate(args []string) error {
 		}
 	}
 	if name == "" {
-		return fmt.Errorf("usage: claudectx create <name> [--from <ctx>] [--empty]")
+		return fmt.Errorf("usage: claudectx create <name> [--from [<ctx>]]")
 	}
 	if err := store.ValidateName(name); err != nil {
 		return err
@@ -264,11 +273,12 @@ func (a *App) cmdCreate(args []string) error {
 	if a.S.Exists(name) {
 		return fmt.Errorf("context %q already exists", name)
 	}
-	if empty && from != "" {
+	if empty && fromGiven {
 		return fmt.Errorf("--empty and --from are mutually exclusive")
 	}
 
-	if empty {
+	// Default: an empty context. `--empty` makes that explicit.
+	if !fromGiven {
 		if err := a.S.ScaffoldContext(name); err != nil {
 			return err
 		}
@@ -283,7 +293,7 @@ func (a *App) cmdCreate(args []string) error {
 	}
 
 	if from == "" {
-		from = st.Current
+		from = st.Current // `--from` with no value clones the current context
 	}
 	if !a.S.Exists(from) {
 		return fmt.Errorf("no such context %q", from)

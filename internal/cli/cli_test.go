@@ -149,10 +149,35 @@ func TestCreateFromCopiesWithoutSecrets(t *testing.T) {
 	}
 	// Internal symlinks preserved: make one and re-copy.
 	os.Symlink("/tmp", filepath.Join(h.e.P.CtxClaudeDir("default"), "linky"))
-	h.mustRun(t, "create", "clone2")
+	h.mustRun(t, "create", "clone2", "--from", "default")
 	fi, err := os.Lstat(filepath.Join(h.e.P.CtxClaudeDir("clone2"), "linky"))
 	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatal("internal symlink not preserved as symlink")
+	}
+}
+
+func TestCreateDefaultsToEmpty(t *testing.T) {
+	h := initialized(t)
+	// default has settings.json + skills from BuildClaudeTree.
+	h.mustRun(t, "create", "fresh")
+	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("fresh"), "settings.json")); err == nil {
+		t.Fatal("bare `create` cloned settings.json; default should be empty")
+	}
+	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("fresh"), "skills")); err == nil {
+		t.Fatal("bare `create` cloned skills; default should be empty")
+	}
+	// But onboarding flags are still seeded so Claude skips first-run setup.
+	data, err := os.ReadFile(h.e.P.CtxClaudeJSON("fresh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "hasCompletedOnboarding") {
+		t.Fatalf("empty context not seeded with onboarding flags: %s", data)
+	}
+	// `--from` with no value clones the current context.
+	h.mustRun(t, "create", "cloned", "--from")
+	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("cloned"), "settings.json")); err != nil {
+		t.Fatal("`--from` with no value should clone the current context")
 	}
 }
 

@@ -27,7 +27,9 @@ Usage:
   claudectx list [--json]
   claudectx current
   claudectx show [name] [--json]
-  claudectx create <name> [--from <ctx>] [--empty]
+  claudectx create <name> [--from [<ctx>]]
+                                 empty by default; --from <ctx> clones a
+                                 context (--from alone clones the current one)
   claudectx delete <name> [--yes]
   claudectx rename <old> <new>
   claudectx init [--yes]
