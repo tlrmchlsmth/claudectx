@@ -1,5 +1,15 @@
-// Package doctor checks the health of claudectx-managed state. Symlinks are
-// treated as ground truth; state.json is corrected to match them with --fix.
+// Package doctor implements `claudectx doctor`: read-only health checks over
+// everything claudectx manages, with an optional --fix for the safe subset.
+//
+// It exists because the managed state can drift in ways no single command
+// notices: a tool replaces the ~/.claude symlink with a real directory, a
+// crashed switch leaves a stale journal, secrets lose their 0600 perms, or
+// state.json disagrees with where the symlinks actually point. When state
+// and links disagree, the links win — they are what Claude/Codex actually
+// read — and --fix rewrites state.json to match, never the other way around.
+//
+// Each check returns a Finding{Severity, Message, Fix}; Fix is nil for
+// problems that need a human (e.g. a foreign symlink we refuse to touch).
 package doctor
 
 import (

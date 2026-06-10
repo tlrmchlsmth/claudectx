@@ -143,6 +143,64 @@ spliced around your comments and re-validated before writing; `settings.json`
 | `CLAUDECTX_CLAUDE_JSON` | `~/.claude.json` | copy-swapped Claude state file |
 | `CLAUDECTX_NO_KEYCHAIN` | unset | disable macOS Keychain handling |
 
+## Architecture
+
+```mermaid
+graph TD
+    main["main.go"] --> cli["internal/cli<br/>dispatch + commands"]
+
+    cli --> adopt["internal/adopt<br/>init: take over ~/.claude + ~/.codex"]
+    cli --> switcher["internal/switcher<br/>journaled switch + crash recovery"]
+    cli --> doctor["internal/doctor<br/>health checks, --fix"]
+    cli --> translate["internal/translate<br/>instructions / skills / mcp / settings"]
+
+    adopt --> linker["internal/linker<br/>symlink classify + atomic repoint"]
+    switcher --> linker
+    doctor --> linker
+
+    adopt --> store["internal/store<br/>state.json, journal, context CRUD"]
+    switcher --> store
+    doctor --> store
+
+    switcher --> keychain["internal/keychain<br/>macOS security CLI behind an interface"]
+    cli --> procs["internal/procs<br/>detect running claude/codex"]
+
+    translate --> tomlx["internal/tomlx<br/>TOML emit + comment-preserving splice"]
+    translate --> frontmatter["internal/frontmatter<br/>SKILL.md frontmatter"]
+    translate --> reportpkg["internal/report<br/>actions + lossiness notes"]
+
+    store --> paths["internal/paths<br/>all path/env resolution"]
+    linker --> paths
+```
+
+Layering rules: `paths` is the only package that reads environment variables;
+everything receives a `Paths` value, which is what makes the whole tree
+testable under a temp dir. `linker` and `store` are the primitives;
+`switcher` (the correctness core — every mutation is journaled in
+`state.json` and rolled forward after a crash) and `adopt` compose them;
+`cli` only parses arguments and formats output. `translate` is a pure
+planner: each translator returns `Action`s with attached `LossNote`s, and
+nothing touches disk until the plan is applied — which is why `--dry-run`
+output is exactly what a real run does.
+
+| Package | One-liner |
+|---|---|
+| `cli` | argument dispatch (bare context names → `switch`), command implementations, exit codes |
+| `paths` | resolves every location from env (`CLAUDECTX_*`, `CLAUDE_CONFIG_DIR`, `CODEX_HOME`), detects terminal pinning |
+| `store` | `state.json` read/write, crash journal, context list/create/trash, name validation |
+| `linker` | classifies `~/.claude`/`~/.codex` (real dir / managed link / foreign link / dangling) and atomically repoints symlinks |
+| `switcher` | the 5-step journaled switch: stash keychain → capture claude.json → repoint links → restore claude.json → restore keychain |
+| `adopt` | `init`: moves existing real dirs into the `default` context and symlinks back; refuses foreign symlinks |
+| `keychain` | `Backend` interface over the macOS `security` CLI (secret via stdin, never argv) with `Null`/`Fake` implementations |
+| `procs` | scans `ps` for running `claude`/`codex` so switch/rename can warn first |
+| `doctor` | read-only health checks (links vs state, perms, stale journal, old codex layout) with an auto-`--fix` subset |
+| `translate` | the four translators; plan-then-apply with per-artifact lossiness reporting |
+| `tomlx` | minimal TOML emitter + textual section splice that preserves user comments, re-validated before write |
+| `frontmatter` | tolerant SKILL.md frontmatter parse that round-trips byte-faithfully |
+| `report` | shared `Action`/`LossNote` model and terminal rendering |
+| `fsx` | `CopyTree` (symlink-preserving) shared by adopt/create/skills |
+| `testenv` | test fixture builder: fabricates realistic `~/.claude`/`~/.codex` trees under `t.TempDir()` |
+
 ## Development
 
 ```sh
