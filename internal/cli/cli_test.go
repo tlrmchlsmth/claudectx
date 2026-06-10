@@ -127,8 +127,12 @@ func TestSwitchToUnknownNameFails(t *testing.T) {
 
 func TestCreateFromCopiesWithoutSecrets(t *testing.T) {
 	h := initialized(t)
-	// Give default a keychain stash that must NOT be copied.
+	// Plant all three credential stores in the source; none may be cloned.
 	h.e.WriteFile(h.e.P.CtxKeychainStash("default"), `{"password":"tok"}`)
+	codexAuth := filepath.Join(h.e.P.CtxCodexDir("default"), "auth.json")
+	h.e.WriteFile(codexAuth, `{"OPENAI_API_KEY":"sk-secret"}`)
+	claudeCreds := filepath.Join(h.e.P.CtxClaudeDir("default"), ".credentials.json")
+	h.e.WriteFile(claudeCreds, `{"token":"oauth"}`)
 
 	h.mustRun(t, "create", "clone", "--from", "default")
 	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("clone"), "settings.json")); err != nil {
@@ -136,6 +140,12 @@ func TestCreateFromCopiesWithoutSecrets(t *testing.T) {
 	}
 	if _, err := os.Stat(h.e.P.CtxKeychainStash("clone")); err == nil {
 		t.Fatal("secrets were copied into clone")
+	}
+	if _, err := os.Stat(filepath.Join(h.e.P.CtxCodexDir("clone"), "auth.json")); err == nil {
+		t.Fatal("codex auth.json (API key) was copied into clone")
+	}
+	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("clone"), ".credentials.json")); err == nil {
+		t.Fatal("claude .credentials.json was copied into clone")
 	}
 	// Internal symlinks preserved: make one and re-copy.
 	os.Symlink("/tmp", filepath.Join(h.e.P.CtxClaudeDir("default"), "linky"))

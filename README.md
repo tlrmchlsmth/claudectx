@@ -99,7 +99,10 @@ converges. `claudectx doctor` shows any pending journal.
 
 Each context carries its own logins:
 
-- **Codex**: `auth.json` lives inside the symlinked dir — travels automatically.
+- **Codex**: `auth.json` (a ChatGPT login *or* your `OPENAI_API_KEY`) lives
+  inside the symlinked dir — travels with the context automatically. Use
+  `codex login --api-key` so the key lands on disk; a key set only via the
+  `OPENAI_API_KEY` shell variable is not context-scoped.
 - **Claude Code (macOS)**: the OAuth token lives in the Keychain. On switch,
   claudectx stashes it into the outgoing context
   (`contexts/<name>/secrets/`, mode 0600) and restores the incoming context's
@@ -108,8 +111,10 @@ Each context carries its own logins:
 - **Claude Code (Linux)**: `~/.claude/.credentials.json` travels with the dir.
 
 Disable keychain handling with `CLAUDECTX_NO_KEYCHAIN=1`.
-Tokens are never copied by `create --from`, never printed, and never passed
-as command-line arguments.
+No credential — the Keychain stash, Claude's `.credentials.json`, or Codex's
+`auth.json` — is ever copied by `create --from`; clones start logged out so
+each context holds its own key. Tokens are also never printed and never
+passed as command-line arguments.
 
 ## Commands
 

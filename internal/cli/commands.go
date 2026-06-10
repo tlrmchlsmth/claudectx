@@ -294,10 +294,9 @@ func (a *App) cmdCreate(args []string) error {
 			return err
 		}
 	}
-	// secrets/ is excluded: tokens are never copied between contexts.
-	err = fsx.CopyTree(a.P.ContextDir(from), a.P.ContextDir(name), func(rel string) bool {
-		return rel == "secrets" || strings.HasPrefix(rel, "secrets"+string(filepath.Separator))
-	})
+	// Credentials are never copied between contexts (see isCredentialPath):
+	// the clone starts with no logins so each context holds its own key.
+	err = fsx.CopyTree(a.P.ContextDir(from), a.P.ContextDir(name), isCredentialPath)
 	if err != nil {
 		return err
 	}
@@ -306,6 +305,24 @@ func (a *App) cmdCreate(args []string) error {
 	}
 	fmt.Fprintf(a.Stdout, "created context %q from %q (credentials not copied — log in per context)\n", name, from)
 	return nil
+}
+
+// isCredentialPath reports whether rel (a path relative to a context dir)
+// holds authentication material that must never be cloned by `create --from`.
+// Covers all three credential stores:
+//   - secrets/                  Claude macOS Keychain stash
+//   - claude/.credentials.json  Claude OAuth token on Linux
+//   - codex/auth.json[.lock]    Codex ChatGPT login or OPENAI_API_KEY
+func isCredentialPath(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	switch rel {
+	case "secrets",
+		"claude/.credentials.json",
+		"codex/auth.json",
+		"codex/auth.json.lock":
+		return true
+	}
+	return strings.HasPrefix(rel, "secrets/")
 }
 
 // seedClaudeJSON extracts onboarding-related flags from an existing
