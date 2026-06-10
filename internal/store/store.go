@@ -22,7 +22,7 @@ var Reserved = map[string]bool{
 	"list": true, "current": true, "create": true, "delete": true,
 	"rename": true, "show": true, "init": true, "translate": true,
 	"doctor": true, "switch": true, "version": true, "help": true,
-	"env": true, "shell": true, "shell-init": true,
+	"env": true, "shell": true, "shell-init": true, "completion": true,
 	"claude": true, "codex": true, "migrate": true,
 }
 

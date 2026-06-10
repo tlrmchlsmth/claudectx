@@ -45,6 +45,8 @@ Usage:
   claudectx shell [--claude <p>] [--codex <p>]
                                   subshell with the given pins
   claudectx shell-init            print a 'cx' helper for your shell rc
+  claudectx completion <bash|zsh|fish>
+                                  print a tab-completion script
   claudectx translate <claude-to-codex|codex-to-claude>
             [--claude <profile>] [--codex <profile>]
             [--only instructions,skills,mcp,settings]
@@ -93,8 +95,11 @@ func (a *App) Run(args []string) int {
 	cmd, rest := dispatch(args)
 
 	// Roll forward any interrupted operation before doing anything else —
-	// except for commands that must work pre-init or pre-migration.
-	if cmd != "init" && cmd != "help" && cmd != "version" && cmd != "migrate" {
+	// except for commands that must work pre-init or pre-migration, and the
+	// completion plumbing, which must stay fast and side-effect-free.
+	switch cmd {
+	case "init", "help", "version", "migrate", "completion", "__complete":
+	default:
 		if code, fatal := a.recoverIfNeeded(); fatal {
 			return code
 		}
@@ -138,6 +143,10 @@ func (a *App) Run(args []string) int {
 		err = a.cmdShell(rest)
 	case "shell-init":
 		err = a.cmdShellInit()
+	case "completion":
+		err = a.cmdCompletion(rest)
+	case "__complete":
+		err = a.cmdComplete(rest)
 	default:
 		a.unknownCommand(cmd)
 		return 2

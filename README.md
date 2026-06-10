@@ -69,6 +69,23 @@ servers, and history, not the OAuth token. (Codex `auth.json` *is*
 per-profile even when pinned.) Avoid running global switches while a pinned
 terminal actively uses the same profile — both write the same `.claude.json`.
 
+## Tab completion
+
+`claudectx completion <bash|zsh|fish>` prints a completion script that
+completes subcommands, tool names, flags, and live profile names:
+
+```sh
+# bash (~/.bashrc) or zsh (~/.zshrc, after compinit):
+eval "$(claudectx completion bash)"
+eval "$(claudectx completion zsh)"
+
+# fish:
+claudectx completion fish > ~/.config/fish/completions/claudectx.fish
+```
+
+The zsh script also works as a static file: save it as `_claudectx`
+anywhere in your `$fpath`.
+
 ## How it works
 
 ```
@@ -145,6 +162,7 @@ passed as command-line arguments.
 | `claudectx translate <direction>` | convert config between the tools (below) |
 | `claudectx migrate` | upgrade a v1 paired-context install (below) |
 | `claudectx doctor [--fix]` | verify symlinks, perms, state consistency |
+| `claudectx completion <bash\|zsh\|fish>` | print a tab-completion script |
 
 ## Translation
 
