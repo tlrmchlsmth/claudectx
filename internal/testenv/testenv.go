@@ -115,3 +115,56 @@ func (e *Env) BuildOldCodexTree() {
 	e.WriteFile(filepath.Join(d, "config.json"), `{"model":""}`)
 	e.WriteFile(filepath.Join(d, "instructions.md"), "")
 }
+
+// BuildV1ContextsTree fabricates a v1 paired-context installation mirroring
+// the real machine this tool was developed on:
+//
+//   - context "claude-vertex": real Claude content (CLAUDE.md, settings,
+//     skills, in-dir .claude.json) PLUS a stale root-level claude.json from
+//     an older layout; a junk-ish but non-empty codex half; a keychain stash.
+//   - context "codex-work": junk claude half; codex half holding auth.json
+//     (the precious API key); an EMPTY secrets dir.
+//   - live symlinks for both tools -> claude-vertex; v1 state.json.
+func (e *Env) BuildV1ContextsTree() {
+	e.T.Helper()
+	ctxs := filepath.Join(e.P.Home, "contexts")
+
+	// claude-vertex: the real Claude setup.
+	cv := filepath.Join(ctxs, "claude-vertex")
+	e.WriteFile(filepath.Join(cv, "claude", "CLAUDE.md"), "# Global rules\n\nBe terse.\n")
+	e.WriteFile(filepath.Join(cv, "claude", "settings.json"),
+		`{"model":"claude-opus-4-6","permissions":{"defaultMode":"acceptEdits"}}`)
+	e.WriteFile(filepath.Join(cv, "claude", "skills", "crashlog", "SKILL.md"),
+		"---\nname: crashlog\ndescription: Diagnose crashes\n---\n\nbody\n")
+	e.WriteFile(filepath.Join(cv, "claude", ".claude.json"),
+		`{"hasCompletedOnboarding":true,"mcpServers":{"files":{"command":"npx"}}}`)
+	e.WriteFile(filepath.Join(cv, "claude.json"), `{"stale":"root level copy from old layout"}`)
+	e.WriteFile(filepath.Join(cv, "codex", "log", "codex.log"), "ran logged out\n")
+	e.WriteFile(filepath.Join(cv, "secrets", "claude-keychain.json"),
+		`{"service":"Claude Code-credentials","account":"me@example.com","password":"tok-personal"}`)
+	os.Chmod(filepath.Join(cv, "secrets", "claude-keychain.json"), 0o600)
+	os.Chmod(filepath.Join(cv, "secrets"), 0o700)
+
+	// codex-work: junk claude half, codex half with the API key.
+	cw := filepath.Join(ctxs, "codex-work")
+	e.WriteFile(filepath.Join(cw, "claude", ".claude.json"), `{"hasCompletedOnboarding":true}`)
+	e.WriteFile(filepath.Join(cw, "claude", "shell-snapshots", "snap.sh"), "")
+	e.WriteFile(filepath.Join(cw, "codex", "auth.json"), `{"OPENAI_API_KEY":"sk-work"}`)
+	os.Chmod(filepath.Join(cw, "codex", "auth.json"), 0o600)
+	e.WriteFile(filepath.Join(cw, "codex", "log", "codex.log"), "")
+	if err := os.MkdirAll(filepath.Join(cw, "secrets"), 0o700); err != nil {
+		e.T.Fatal(err)
+	}
+
+	// Live links + v1 state.
+	if err := os.Symlink(filepath.Join(cv, "claude"), e.P.ClaudeDir); err != nil {
+		e.T.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(cv, "codex"), e.P.CodexDir); err != nil {
+		e.T.Fatal(err)
+	}
+	e.WriteFile(e.P.ClaudeJSON, `{"hasCompletedOnboarding":true,"mcpServers":{"files":{"command":"npx"}}}`)
+	os.Chmod(e.P.ClaudeJSON, 0o600)
+	e.WriteFile(filepath.Join(e.P.Home, "state.json"),
+		`{"version":1,"current":"claude-vertex","previous":"codex-work","in_progress":null}`)
+}

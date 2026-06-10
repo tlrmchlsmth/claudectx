@@ -1,5 +1,6 @@
-// claudectx is a kubectx-style switcher for paired Claude Code + Codex CLI
-// contexts: settings, tokens, skills, instructions, and MCP servers.
+// claudectx is a kubectx-style switcher for per-tool Claude Code and Codex
+// CLI profiles: settings, tokens, skills, instructions, and MCP servers,
+// each tool switched independently.
 package main
 
 import (
@@ -10,7 +11,7 @@ import (
 )
 
 // version is overridable at build time: -ldflags "-X main.version=v1.2.3".
-var version = "0.1.0"
+var version = "0.2.0"
 
 func main() {
 	app := cli.NewApp(paths.FromEnv(), version)

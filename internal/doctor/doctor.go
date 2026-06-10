@@ -13,15 +13,16 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/tlrmchlsmth/claudectx/internal/linker"
 	"github.com/tlrmchlsmth/claudectx/internal/paths"
 	"github.com/tlrmchlsmth/claudectx/internal/store"
+	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
 
 type Finding struct {
@@ -45,6 +46,10 @@ func (d *Doctor) Check() []Finding {
 		return []Finding{{Severity: "info", Message: "not initialized — run `claudectx init`"}}
 	}
 	st, err := d.S.Load()
+	if errors.Is(err, store.ErrV1State) {
+		return []Finding{{Severity: "error",
+			Message: "state is the v1 paired-context layout — run `claudectx migrate` to upgrade to per-tool profiles"}}
+	}
 	if err != nil {
 		return []Finding{{Severity: "error", Message: err.Error()}}
 	}
@@ -57,65 +62,74 @@ func (d *Doctor) Check() []Finding {
 		})
 	}
 
-	if !d.S.Exists(st.Current) {
-		fs = append(fs, Finding{Severity: "error",
-			Message: fmt.Sprintf("state says current context is %q but contexts/%s does not exist", st.Current, st.Current)})
+	if d.P.LegacyTerminalPin {
+		fs = append(fs, Finding{Severity: "warn",
+			Message: "this terminal is pinned into the old contexts/ layout (stale CLAUDE_CONFIG_DIR/CODEX_HOME) — re-run `eval \"$(claudectx env ...)\"` or `cx off`"})
 	}
 
-	// Links are ground truth; state.json follows them.
-	linkCtx := map[string]string{}
-	for _, item := range []struct{ live, label string }{
-		{d.P.ClaudeDir, "claude"},
-		{d.P.CodexDir, "codex"},
-	} {
-		c, err := linker.Classify(item.live, d.P.ContextsDir())
+	for _, t := range tool.All {
+		axis := st.Axis(t)
+		if !d.S.Exists(t, axis.Current) {
+			fs = append(fs, Finding{Severity: "error",
+				Message: fmt.Sprintf("state says current %s profile is %q but profiles/%s/%s does not exist", t, axis.Current, t, axis.Current)})
+		}
+
+		// Links are ground truth; state.json follows them.
+		live := d.P.LiveDir(t)
+		c, err := linker.Classify(live, d.P.ToolProfilesDir(t))
 		if err != nil {
-			fs = append(fs, Finding{Severity: "error", Message: fmt.Sprintf("%s: %v", item.live, err)})
+			fs = append(fs, Finding{Severity: "error", Message: fmt.Sprintf("%s: %v", live, err)})
 			continue
 		}
 		switch c.Kind {
 		case linker.ManagedLink:
-			linkCtx[item.label] = c.Context
-			if c.Context != st.Current {
-				ctx := c.Context
+			if c.Context != axis.Current {
+				name, ax := c.Context, axis
 				fs = append(fs, Finding{
 					Severity: "warn",
-					Message: fmt.Sprintf("%s points at context %q but state says %q (links win)",
-						item.live, c.Context, st.Current),
+					Message: fmt.Sprintf("%s points at %s profile %q but state says %q (links win)",
+						live, t, c.Context, axis.Current),
 					Fix: func() error {
-						st.Previous = st.Current
-						st.Current = ctx
+						ax.Previous = ax.Current
+						ax.Current = name
 						return d.S.Save(st)
 					},
 				})
 			} else {
 				fs = append(fs, Finding{Severity: "ok",
-					Message: fmt.Sprintf("%s -> context %q", item.live, c.Context)})
+					Message: fmt.Sprintf("%s -> %s profile %q", live, t, c.Context)})
 			}
 		case linker.Real:
 			fs = append(fs, Finding{Severity: "error",
-				Message: fmt.Sprintf("%s is a real directory — something replaced the managed symlink (a tool may have done a directory-level rewrite); back it up and re-run `claudectx init`", item.live)})
+				Message: fmt.Sprintf("%s is a real directory — something replaced the managed symlink (a tool may have done a directory-level rewrite); back it up and re-run `claudectx init`", live)})
 		case linker.Dangling:
 			fs = append(fs, Finding{Severity: "error",
-				Message: fmt.Sprintf("%s is a dangling symlink to %s", item.live, c.Target)})
+				Message: fmt.Sprintf("%s is a dangling symlink to %s", live, c.Target)})
 		case linker.ForeignLink:
 			fs = append(fs, Finding{Severity: "error",
-				Message: fmt.Sprintf("%s is a foreign symlink to %s — claudectx will not touch it", item.live, c.Target)})
+				Message: fmt.Sprintf("%s is a foreign symlink to %s — claudectx will not touch it", live, c.Target)})
 		case linker.Missing:
-			live := item.live
-			target := filepath.Join(d.P.ContextDir(st.Current), item.label)
+			liveDir := live
+			target := d.P.ProfileHome(t, axis.Current)
 			fs = append(fs, Finding{
 				Severity: "warn",
-				Message:  fmt.Sprintf("%s is missing — should link to %s", live, target),
-				Fix:      func() error { return linker.Replace(live, target) },
+				Message:  fmt.Sprintf("%s is missing — should link to %s", liveDir, target),
+				Fix:      func() error { return linker.Replace(liveDir, target) },
 			})
 		}
+	}
+
+	// Leftover v1 layout next to a v2 state means a migration finished but
+	// something recreated contexts/ — or a partial manual restore.
+	if _, err := os.Stat(d.P.LegacyContextsDir()); err == nil {
+		fs = append(fs, Finding{Severity: "warn",
+			Message: fmt.Sprintf("legacy %s exists alongside the v2 layout — inspect and remove or re-run `claudectx migrate`", d.P.LegacyContextsDir())})
 	}
 
 	// claude.json: presence and permissions.
 	if fi, err := os.Stat(d.P.ClaudeJSON); err != nil {
 		fs = append(fs, Finding{Severity: "warn",
-			Message: fmt.Sprintf("%s missing — Claude Code will recreate it; context copy will repopulate on next switch", d.P.ClaudeJSON)})
+			Message: fmt.Sprintf("%s missing — Claude Code will recreate it; profile copy will repopulate on next switch", d.P.ClaudeJSON)})
 	} else if fi.Mode().Perm()&0o077 != 0 {
 		path := d.P.ClaudeJSON
 		fs = append(fs, Finding{
@@ -125,10 +139,10 @@ func (d *Doctor) Check() []Finding {
 		})
 	}
 
-	// Secrets permissions.
-	names, _ := d.S.List()
+	// Secrets permissions (claude axis).
+	names, _ := d.S.List(tool.Claude)
 	for _, name := range names {
-		stash := d.P.CtxKeychainStash(name)
+		stash := d.P.KeychainStash(name)
 		if fi, err := os.Stat(stash); err == nil && fi.Mode().Perm()&0o077 != 0 {
 			p := stash
 			fs = append(fs, Finding{
@@ -137,11 +151,16 @@ func (d *Doctor) Check() []Finding {
 				Fix:      func() error { return os.Chmod(p, 0o600) },
 			})
 		}
-		// Old codex layout: pre-rust CLI files without a config.toml.
-		codexDir := d.P.CtxCodexDir(name)
-		if fileExists(filepath.Join(codexDir, "config.json")) && !fileExists(filepath.Join(codexDir, "config.toml")) {
+	}
+
+	// Old codex layout inside codex profiles: pre-rust CLI files without a
+	// config.toml.
+	codexNames, _ := d.S.List(tool.Codex)
+	for _, name := range codexNames {
+		home := d.P.ProfileHome(tool.Codex, name)
+		if fileExists(home+"/config.json") && !fileExists(home+"/config.toml") {
 			fs = append(fs, Finding{Severity: "info",
-				Message: fmt.Sprintf("context %q has an old-style codex layout (config.json, no config.toml) — `claudectx translate claude-to-codex --context %s` can generate modern config", name, name)})
+				Message: fmt.Sprintf("codex profile %q has an old-style layout (config.json, no config.toml) — `claudectx translate claude-to-codex --codex %s` can generate modern config", name, name)})
 		}
 	}
 
@@ -171,8 +190,7 @@ func (d *Doctor) Run(w io.Writer, fix bool) int {
 	findings := d.Check()
 	problems := 0
 	for _, f := range findings {
-		tag := f.Severity
-		fmt.Fprintf(w, "[%s] %s\n", tag, f.Message)
+		fmt.Fprintf(w, "[%s] %s\n", f.Severity, f.Message)
 		if f.Severity == "ok" || f.Severity == "info" {
 			continue
 		}

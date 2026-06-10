@@ -1,5 +1,5 @@
-// Package store manages claudectx state: the state.json file (current/previous
-// context plus the crash journal) and context directory CRUD.
+// Package store manages claudectx state: the state.json file (per-axis
+// current/previous plus the crash journal) and profile directory CRUD.
 package store
 
 import (
@@ -13,27 +13,38 @@ import (
 	"time"
 
 	"github.com/tlrmchlsmth/claudectx/internal/paths"
+	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
 
-// Reserved are subcommand names that can never be context names, so the
-// bare-name switch shortcut stays unambiguous.
+// Reserved are subcommand names that can never be profile names, so command
+// dispatch stays unambiguous.
 var Reserved = map[string]bool{
 	"list": true, "current": true, "create": true, "delete": true,
 	"rename": true, "show": true, "init": true, "translate": true,
 	"doctor": true, "switch": true, "version": true, "help": true,
 	"env": true, "shell": true, "shell-init": true,
+	"claude": true, "codex": true, "migrate": true,
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func ValidateName(name string) error {
 	if !nameRe.MatchString(name) {
-		return fmt.Errorf("invalid context name %q (allowed: letters, digits, '.', '_', '-'; max 64 chars; must start alphanumeric)", name)
+		return fmt.Errorf("invalid profile name %q (allowed: letters, digits, '.', '_', '-'; max 64 chars; must start alphanumeric)", name)
 	}
 	if Reserved[name] {
-		return fmt.Errorf("%q is a reserved command name and cannot be a context name", name)
+		return fmt.Errorf("%q is a reserved command name and cannot be a profile name", name)
 	}
 	return nil
+}
+
+// MigrateInfo pins down what a v1->v2 migration is moving, so recovery
+// never has to re-derive it from links that move mid-operation.
+type MigrateInfo struct {
+	ClaudeFrom string `json:"claude_from"` // v1 context ~/.claude pointed at
+	CodexFrom  string `json:"codex_from"`  // v1 context ~/.codex pointed at
+	V1Current  string `json:"v1_current"`
+	V1Previous string `json:"v1_previous"`
 }
 
 // Journal records an in-flight multi-step operation so an interrupted run can
@@ -46,19 +57,39 @@ func ValidateName(name string) error {
 // happened) and recovery must reconcile by observing disk state, not by
 // trusting memory of what was done.
 type Journal struct {
-	Op        string `json:"op"`   // "init" | "switch"
-	From      string `json:"from"` // switch only
-	To        string `json:"to"`
-	Step      string `json:"step"`
-	StartedAt string `json:"started_at"`
+	Op        string       `json:"op"`             // "init" | "switch" | "migrate"
+	Tool      string       `json:"tool,omitempty"` // axis for "switch"; "" for whole-system ops
+	From      string       `json:"from,omitempty"`
+	To        string       `json:"to,omitempty"`
+	Step      string       `json:"step"`
+	Migrate   *MigrateInfo `json:"migrate,omitempty"`
+	StartedAt string       `json:"started_at"`
+}
+
+// AxisState is one tool's switch state.
+type AxisState struct {
+	Current  string `json:"current"`
+	Previous string `json:"previous,omitempty"`
 }
 
 type State struct {
-	Version    int      `json:"version"`
-	Current    string   `json:"current"`
-	Previous   string   `json:"previous,omitempty"`
-	InProgress *Journal `json:"in_progress"`
+	Version    int       `json:"version"`
+	Claude     AxisState `json:"claude"`
+	Codex      AxisState `json:"codex"`
+	InProgress *Journal  `json:"in_progress"`
 }
+
+// Axis returns the mutable state for one tool.
+func (st *State) Axis(t tool.Tool) *AxisState {
+	if t == tool.Claude {
+		return &st.Claude
+	}
+	return &st.Codex
+}
+
+// ErrV1State means state.json is the pre-profiles paired-context schema;
+// callers direct the user to `claudectx migrate`.
+var ErrV1State = errors.New("state file is the v1 paired-context layout — run `claudectx migrate` to upgrade to per-tool profiles")
 
 type Store struct {
 	P paths.Paths
@@ -72,6 +103,27 @@ func (s *Store) Initialized() bool {
 	return err == nil
 }
 
+// V1State is the legacy schema, read only by migration.
+type V1State struct {
+	Version    int      `json:"version"`
+	Current    string   `json:"current"`
+	Previous   string   `json:"previous"`
+	InProgress *Journal `json:"in_progress"`
+}
+
+// LoadV1 reads the raw legacy state. It does not validate the version.
+func (s *Store) LoadV1() (*V1State, error) {
+	data, err := os.ReadFile(s.P.StateFile())
+	if err != nil {
+		return nil, err
+	}
+	var st V1State
+	if err := json.Unmarshal(data, &st); err != nil {
+		return nil, fmt.Errorf("corrupt state file %s: %w", s.P.StateFile(), err)
+	}
+	return &st, nil
+}
+
 func (s *Store) Load() (*State, error) {
 	data, err := os.ReadFile(s.P.StateFile())
 	if errors.Is(err, os.ErrNotExist) {
@@ -79,6 +131,15 @@ func (s *Store) Load() (*State, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	var ver struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &ver); err != nil {
+		return nil, fmt.Errorf("corrupt state file %s: %w", s.P.StateFile(), err)
+	}
+	if ver.Version < 2 {
+		return nil, ErrV1State
 	}
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
@@ -88,9 +149,7 @@ func (s *Store) Load() (*State, error) {
 }
 
 func (s *Store) Save(st *State) error {
-	if st.Version == 0 {
-		st.Version = 1
-	}
+	st.Version = 2
 	data, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
@@ -107,9 +166,9 @@ func (s *Store) SetJournal(st *State, j *Journal) error {
 	return s.Save(st)
 }
 
-// List returns context names sorted alphabetically.
-func (s *Store) List() ([]string, error) {
-	entries, err := os.ReadDir(s.P.ContextsDir())
+// List returns profile names for one tool, sorted alphabetically.
+func (s *Store) List(t tool.Tool) ([]string, error) {
+	entries, err := os.ReadDir(s.P.ToolProfilesDir(t))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -126,35 +185,33 @@ func (s *Store) List() ([]string, error) {
 	return names, nil
 }
 
-func (s *Store) Exists(name string) bool {
-	fi, err := os.Stat(s.P.ContextDir(name))
+func (s *Store) Exists(t tool.Tool, name string) bool {
+	fi, err := os.Stat(s.P.ProfileDir(t, name))
 	return err == nil && fi.IsDir()
 }
 
-// ScaffoldContext creates the empty skeleton of a context directory.
-func (s *Store) ScaffoldContext(name string) error {
+// ScaffoldProfile creates the empty skeleton of a profile.
+func (s *Store) ScaffoldProfile(t tool.Tool, name string) error {
 	if err := ValidateName(name); err != nil {
 		return err
 	}
-	for _, d := range []string{
-		s.P.CtxClaudeDir(name),
-		s.P.CtxCodexDir(name),
-	} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
-			return err
-		}
+	if err := os.MkdirAll(s.P.ProfileHome(t, name), 0o755); err != nil {
+		return err
 	}
-	return os.MkdirAll(s.P.CtxSecretsDir(name), 0o700)
+	if t == tool.Claude {
+		return os.MkdirAll(s.P.ProfileSecretsDir(name), 0o700)
+	}
+	return nil
 }
 
-// Trash moves a context dir into backups/ instead of deleting it.
-func (s *Store) Trash(name string) (string, error) {
+// Trash moves a profile dir into backups/ instead of deleting it.
+func (s *Store) Trash(t tool.Tool, name string) (string, error) {
 	if err := os.MkdirAll(s.P.BackupsDir(), 0o755); err != nil {
 		return "", err
 	}
 	dst := filepath.Join(s.P.BackupsDir(),
-		fmt.Sprintf("%s.deleted.%s", name, time.Now().UTC().Format("20060102T150405Z")))
-	if err := os.Rename(s.P.ContextDir(name), dst); err != nil {
+		fmt.Sprintf("%s.%s.deleted.%s", t, name, time.Now().UTC().Format("20060102T150405Z")))
+	if err := os.Rename(s.P.ProfileDir(t, name), dst); err != nil {
 		return "", err
 	}
 	return dst, nil

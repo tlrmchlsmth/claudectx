@@ -1,5 +1,6 @@
-// Package adopt implements `claudectx init`: moving the user's existing
-// ~/.claude and ~/.codex into the "default" context and symlinking back.
+// Package adopt implements `claudectx init` for fresh installs: moving the
+// user's existing ~/.claude and ~/.codex into per-tool "default" profiles
+// and symlinking back.
 package adopt
 
 import (
@@ -15,9 +16,10 @@ import (
 	"github.com/tlrmchlsmth/claudectx/internal/linker"
 	"github.com/tlrmchlsmth/claudectx/internal/paths"
 	"github.com/tlrmchlsmth/claudectx/internal/store"
+	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
 
-const DefaultContext = "default"
+const DefaultProfile = "default"
 
 type Adopter struct {
 	P   paths.Paths
@@ -31,6 +33,7 @@ func New(p paths.Paths, s *store.Store, out io.Writer) *Adopter {
 
 // PlanItem describes what init will do to one managed path.
 type PlanItem struct {
+	Tool   tool.Tool
 	Live   string
 	Dest   string
 	Kind   linker.Kind
@@ -40,21 +43,25 @@ type PlanItem struct {
 // Plan classifies the managed paths and describes the adoption. It returns an
 // error if any path is in a state we refuse to touch (foreign symlink).
 func (a *Adopter) Plan() ([]PlanItem, error) {
-	items := []PlanItem{
-		{Live: a.P.ClaudeDir, Dest: a.P.CtxClaudeDir(DefaultContext)},
-		{Live: a.P.CodexDir, Dest: a.P.CtxCodexDir(DefaultContext)},
+	var items []PlanItem
+	for _, t := range tool.All {
+		items = append(items, PlanItem{
+			Tool: t,
+			Live: a.P.LiveDir(t),
+			Dest: a.P.ProfileHome(t, DefaultProfile),
+		})
 	}
 	for i := range items {
-		c, err := linker.Classify(items[i].Live, a.P.ContextsDir())
+		c, err := linker.Classify(items[i].Live, a.P.ToolProfilesDir(items[i].Tool))
 		if err != nil {
 			return nil, err
 		}
 		items[i].Kind = c.Kind
 		switch c.Kind {
 		case linker.Real:
-			items[i].Action = fmt.Sprintf("move into context %q and symlink back", DefaultContext)
+			items[i].Action = fmt.Sprintf("move into %s profile %q and symlink back", items[i].Tool, DefaultProfile)
 		case linker.Missing:
-			items[i].Action = fmt.Sprintf("create empty dir in context %q and symlink", DefaultContext)
+			items[i].Action = fmt.Sprintf("create empty %s profile %q and symlink", items[i].Tool, DefaultProfile)
 		case linker.ManagedLink:
 			items[i].Action = "already managed — leave as is"
 		case linker.ForeignLink:
@@ -77,13 +84,18 @@ func (a *Adopter) Run(items []PlanItem) error {
 			fmt.Fprintln(a.Out, "already initialized")
 			return nil
 		}
+		if errors.Is(err, store.ErrV1State) {
+			return err
+		}
 	}
 
 	if err := os.MkdirAll(a.P.BackupsDir(), 0o755); err != nil {
 		return err
 	}
-	if err := a.S.ScaffoldContext(DefaultContext); err != nil {
-		return err
+	for _, t := range tool.All {
+		if err := a.S.ScaffoldProfile(t, DefaultProfile); err != nil {
+			return err
+		}
 	}
 
 	// Cheap insurance before we start touching things.
@@ -95,8 +107,11 @@ func (a *Adopter) Run(items []PlanItem) error {
 		}
 	}
 
-	st := &store.State{Version: 1, Current: DefaultContext}
-	j := &store.Journal{Op: "init", To: DefaultContext, Step: "move"}
+	st := &store.State{
+		Claude: store.AxisState{Current: DefaultProfile},
+		Codex:  store.AxisState{Current: DefaultProfile},
+	}
+	j := &store.Journal{Op: "init", To: DefaultProfile, Step: "move"}
 	if err := a.S.SetJournal(st, j); err != nil {
 		return err
 	}
@@ -107,14 +122,16 @@ func (a *Adopter) Run(items []PlanItem) error {
 		}
 	}
 
-	// Copy (not move) claude.json into the context: the live file stays in
-	// place and is copy-swapped on every switch.
+	// Copy (not move) the live claude.json into the claude profile: the live
+	// file stays in place and is copy-swapped on every claude switch.
 	if _, err := os.Stat(a.P.ClaudeJSON); errors.Is(err, os.ErrNotExist) {
-		if err := store.WriteFileAtomic(a.P.CtxClaudeJSON(DefaultContext), []byte("{}\n"), 0o600); err != nil {
-			return err
+		if _, err := os.Stat(a.P.ProfileClaudeJSON(DefaultProfile)); errors.Is(err, os.ErrNotExist) {
+			if err := store.WriteFileAtomic(a.P.ProfileClaudeJSON(DefaultProfile), []byte("{}\n"), 0o600); err != nil {
+				return err
+			}
 		}
 	} else {
-		if err := store.CopyFileAtomic(a.P.ClaudeJSON, a.P.CtxClaudeJSON(DefaultContext), 0o600); err != nil {
+		if err := store.CopyFileAtomic(a.P.ClaudeJSON, a.P.ProfileClaudeJSON(DefaultProfile), 0o600); err != nil {
 			return err
 		}
 	}
@@ -123,13 +140,13 @@ func (a *Adopter) Run(items []PlanItem) error {
 	if err := a.S.Save(st); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Out, "Initialized: context %q now holds your Claude and Codex state\n", DefaultContext)
+	fmt.Fprintf(a.Out, "Initialized: claude and codex profiles %q now hold your state\n", DefaultProfile)
 	return nil
 }
 
 // adoptOne is idempotent: re-running after a crash skips completed moves.
 func (a *Adopter) adoptOne(item PlanItem) error {
-	c, err := linker.Classify(item.Live, a.P.ContextsDir())
+	c, err := linker.Classify(item.Live, a.P.ToolProfilesDir(item.Tool))
 	if err != nil {
 		return err
 	}
@@ -137,7 +154,7 @@ func (a *Adopter) adoptOne(item PlanItem) error {
 	case linker.ManagedLink:
 		return nil // done in a previous (interrupted) run
 	case linker.Real:
-		// The context skeleton created an empty dest dir; remove it so the
+		// The profile skeleton created an empty dest dir; remove it so the
 		// rename can land. Refuse if dest already has real content (a crashed
 		// half-state doctor should look at, not something to clobber).
 		if entries, err := os.ReadDir(item.Dest); err == nil && len(entries) > 0 {

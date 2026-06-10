@@ -11,12 +11,21 @@ import (
 	"github.com/tlrmchlsmth/claudectx/internal/linker"
 	"github.com/tlrmchlsmth/claudectx/internal/store"
 	"github.com/tlrmchlsmth/claudectx/internal/testenv"
+	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
 
 func newAdopter(e *testenv.Env) (*adopt.Adopter, *store.Store, *bytes.Buffer) {
 	s := store.New(e.P)
 	out := &bytes.Buffer{}
 	return adopt.New(e.P, s, out), s, out
+}
+
+func assertManaged(t *testing.T, e *testenv.Env, tl tool.Tool, profile string) {
+	t.Helper()
+	c, err := linker.Classify(e.P.LiveDir(tl), e.P.ToolProfilesDir(tl))
+	if err != nil || c.Kind != linker.ManagedLink || c.Context != profile {
+		t.Fatalf("%s live: %+v, %v", tl, c, err)
+	}
 }
 
 func TestInitHappyPath(t *testing.T) {
@@ -34,16 +43,16 @@ func TestInitHappyPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Both live paths must now be managed symlinks into "default".
-	for _, p := range []string{e.P.ClaudeDir, e.P.CodexDir} {
-		c, err := linker.Classify(p, e.P.ContextsDir())
-		if err != nil || c.Kind != linker.ManagedLink || c.Context != "default" {
-			t.Fatalf("%s: %+v, %v", p, c, err)
-		}
+	// Both live paths must now be managed symlinks into per-tool "default".
+	assertManaged(t, e, tool.Claude, adopt.DefaultProfile)
+	assertManaged(t, e, tool.Codex, adopt.DefaultProfile)
+
+	// Content travelled to the per-tool homes.
+	if _, err := os.Stat(filepath.Join(e.P.ProfileHome(tool.Claude, "default"), "settings.json")); err != nil {
+		t.Fatal("settings.json did not move into the claude profile")
 	}
-	// Content travelled.
-	if _, err := os.Stat(filepath.Join(e.P.CtxClaudeDir("default"), "settings.json")); err != nil {
-		t.Fatal("settings.json did not move into context")
+	if _, err := os.Stat(filepath.Join(e.P.ProfileHome(tool.Codex, "default"), "auth.json")); err != nil {
+		t.Fatal("auth.json did not move into the codex profile")
 	}
 	// Resolving through the symlink still works.
 	if _, err := os.ReadFile(filepath.Join(e.P.ClaudeDir, "settings.json")); err != nil {
@@ -53,17 +62,17 @@ func TestInitHappyPath(t *testing.T) {
 	if _, err := os.Stat(e.P.ClaudeJSON); err != nil {
 		t.Fatal("live claude.json disappeared")
 	}
-	if _, err := os.Stat(e.P.CtxClaudeJSON("default")); err != nil {
-		t.Fatal("context claude.json copy missing")
+	if _, err := os.Stat(e.P.ProfileClaudeJSON("default")); err != nil {
+		t.Fatal("profile claude.json copy missing")
 	}
 	// Backup exists.
 	entries, _ := os.ReadDir(e.P.BackupsDir())
 	if len(entries) == 0 {
 		t.Fatal("no pre-init backup of claude.json")
 	}
-	// State recorded.
+	// State recorded for both axes.
 	st, err := s.Load()
-	if err != nil || st.Current != "default" || st.InProgress != nil {
+	if err != nil || st.Claude.Current != "default" || st.Codex.Current != "default" || st.InProgress != nil {
 		t.Fatalf("state: %+v, %v", st, err)
 	}
 }
@@ -81,12 +90,9 @@ func TestInitMissingCodex(t *testing.T) {
 	if err := ad.Run(items); err != nil {
 		t.Fatal(err)
 	}
-	c, _ := linker.Classify(e.P.CodexDir, e.P.ContextsDir())
-	if c.Kind != linker.ManagedLink {
-		t.Fatalf("missing codex should become a managed link to an empty dir, got %v", c.Kind)
-	}
-	// Stub claude.json written into context.
-	data, err := os.ReadFile(e.P.CtxClaudeJSON("default"))
+	assertManaged(t, e, tool.Codex, adopt.DefaultProfile)
+	// Stub claude.json written into the claude profile.
+	data, err := os.ReadFile(e.P.ProfileClaudeJSON("default"))
 	if err != nil || strings.TrimSpace(string(data)) != "{}" {
 		t.Fatalf("claude.json stub: %q, %v", data, err)
 	}
@@ -142,17 +148,14 @@ func TestInitIdempotent(t *testing.T) {
 	}
 }
 
-func TestInitOldCodexLayoutMovesUntouched(t *testing.T) {
+func TestInitRefusesV1State(t *testing.T) {
 	e := testenv.New(t)
-	e.BuildClaudeTree()
-	e.BuildOldCodexTree()
+	e.BuildV1ContextsTree()
 	ad, _, _ := newAdopter(e)
-	items, _ := ad.Plan()
-	if err := ad.Run(items); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(e.P.CtxCodexDir("default"), "config.json")); err != nil {
-		t.Fatal("old codex config.json should move untouched")
+	// Plan classifies the live links: they point into contexts/, which is
+	// foreign relative to the profiles root — init must not adopt them.
+	if _, err := ad.Plan(); err == nil {
+		t.Fatal("init on a v1 install should refuse (migrate is the path)")
 	}
 }
 
@@ -166,17 +169,17 @@ func TestInitResumeAfterCrash(t *testing.T) {
 	s := store.New(e.P)
 
 	// Simulate the half-done state: claude already adopted, codex untouched.
-	if err := s.ScaffoldContext("default"); err != nil {
+	if err := s.ScaffoldProfile(tool.Claude, adopt.DefaultProfile); err != nil {
 		t.Fatal(err)
 	}
-	os.Remove(e.P.CtxClaudeDir("default"))
-	if err := os.Rename(e.P.ClaudeDir, e.P.CtxClaudeDir("default")); err != nil {
+	os.Remove(e.P.ProfileHome(tool.Claude, "default"))
+	if err := os.Rename(e.P.ClaudeDir, e.P.ProfileHome(tool.Claude, "default")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(e.P.CtxClaudeDir("default"), e.P.ClaudeDir); err != nil {
+	if err := os.Symlink(e.P.ProfileHome(tool.Claude, "default"), e.P.ClaudeDir); err != nil {
 		t.Fatal(err)
 	}
-	st := &store.State{Current: "default"}
+	st := &store.State{Claude: store.AxisState{Current: "default"}, Codex: store.AxisState{Current: "default"}}
 	if err := s.SetJournal(st, &store.Journal{Op: "init", To: "default", Step: "move"}); err != nil {
 		t.Fatal(err)
 	}
@@ -189,12 +192,8 @@ func TestInitResumeAfterCrash(t *testing.T) {
 	if err := ad.Run(items); err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{e.P.ClaudeDir, e.P.CodexDir} {
-		c, _ := linker.Classify(p, e.P.ContextsDir())
-		if c.Kind != linker.ManagedLink {
-			t.Fatalf("%s not managed after resume: %v", p, c.Kind)
-		}
-	}
+	assertManaged(t, e, tool.Claude, "default")
+	assertManaged(t, e, tool.Codex, "default")
 	stFinal, _ := s.Load()
 	if stFinal.InProgress != nil {
 		t.Fatal("journal not cleared after resumed init")

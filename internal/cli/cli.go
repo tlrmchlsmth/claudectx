@@ -1,9 +1,10 @@
-// Package cli implements the claudectx command surface: kubectx-style
-// bare-name dispatch plus explicit subcommands.
+// Package cli implements the claudectx command surface: per-tool profile
+// switching plus explicit management subcommands.
 package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,33 +12,42 @@ import (
 
 	"github.com/tlrmchlsmth/claudectx/internal/adopt"
 	"github.com/tlrmchlsmth/claudectx/internal/keychain"
+	"github.com/tlrmchlsmth/claudectx/internal/migrate"
 	"github.com/tlrmchlsmth/claudectx/internal/paths"
 	"github.com/tlrmchlsmth/claudectx/internal/store"
 	"github.com/tlrmchlsmth/claudectx/internal/switcher"
+	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
 
-const usage = `claudectx — manage paired Claude Code + Codex CLI contexts
+const usage = `claudectx — per-tool profiles for Claude Code and Codex CLI
 
 Usage:
-  claudectx                      list contexts (current marked)
-  claudectx <name> [--force] [--no-keychain]
-                                 switch to context (--force skips the
-                                 running-process check)
-  claudectx -                    switch to previous context
-  claudectx list [--json]
-  claudectx current
-  claudectx show [name] [--json]
-  claudectx create <name> [--from [<ctx>]]
-                                 empty by default; --from <ctx> clones a
-                                 context (--from alone clones the current one)
-  claudectx delete <name> [--yes]
-  claudectx rename <old> <new>
-  claudectx init [--yes]
-  eval "$(claudectx env <name>)"  pin THIS terminal to a context (--unset to unpin)
-  claudectx shell <name>          subshell pinned to a context
-  claudectx shell-init            print a 'cx' helper function for your shell rc
+  claudectx                       status: both tools' current profiles
+  claudectx claude <name> [--force] [--no-keychain]
+                                  switch the Claude profile
+  claudectx codex <name> [--force]
+                                  switch the Codex profile
+  claudectx claude - / codex -    switch that tool to its previous profile
+  claudectx claude / codex        list that tool's profiles
+  claudectx list [--json]         list both tools' profiles
+  claudectx current [claude|codex]
+  claudectx show <claude|codex> [name] [--json]
+  claudectx create <claude|codex> <name> [--from [<profile>]]
+                                  empty by default; --from <p> clones a
+                                  profile (--from alone clones the current)
+  claudectx delete <claude|codex> <name> [--yes]
+  claudectx rename <claude|codex> <old> <new> [--force]
+  claudectx init [--yes]          adopt existing ~/.claude + ~/.codex
+  claudectx migrate [--yes]       upgrade a v1 paired-context layout
+  eval "$(claudectx env <claude|codex> <name>)"
+                                  pin THIS terminal's tool to a profile
+  claudectx env --unset [<tool>]  unpin one or both tools
+  claudectx shell [--claude <p>] [--codex <p>]
+                                  subshell with the given pins
+  claudectx shell-init            print a 'cx' helper for your shell rc
   claudectx translate <claude-to-codex|codex-to-claude>
-            [--context <name>] [--only instructions,skills,mcp,settings]
+            [--claude <profile>] [--codex <profile>]
+            [--only instructions,skills,mcp,settings]
             [--dry-run] [--force] [--no-inline-imports]
   claudectx doctor [--fix]
   claudectx version
@@ -60,8 +70,9 @@ type App struct {
 	Stdin  io.Reader
 	// Version is stamped from main.
 	Version string
-	// ProcScan reports running agent processes (testable seam).
-	ProcScan func() string
+	// ProcScan reports running agent processes for a tool ("" = all;
+	// testable seam).
+	ProcScan func(t tool.Tool) string
 }
 
 func NewApp(p paths.Paths, version string) *App {
@@ -82,8 +93,8 @@ func (a *App) Run(args []string) int {
 	cmd, rest := dispatch(args)
 
 	// Roll forward any interrupted operation before doing anything else —
-	// except for commands that must work pre-init.
-	if cmd != "init" && cmd != "help" && cmd != "version" {
+	// except for commands that must work pre-init or pre-migration.
+	if cmd != "init" && cmd != "help" && cmd != "version" && cmd != "migrate" {
 		if code, fatal := a.recoverIfNeeded(); fatal {
 			return code
 		}
@@ -95,10 +106,16 @@ func (a *App) Run(args []string) int {
 		fmt.Fprint(a.Stdout, usage)
 	case "version":
 		fmt.Fprintf(a.Stdout, "claudectx %s\n", a.Version)
+	case "status":
+		err = a.cmdStatus()
+	case "claude":
+		err = a.cmdTool(tool.Claude, rest)
+	case "codex":
+		err = a.cmdTool(tool.Codex, rest)
 	case "list":
 		err = a.cmdList(rest)
 	case "current":
-		err = a.cmdCurrent()
+		err = a.cmdCurrent(rest)
 	case "show":
 		err = a.cmdShow(rest)
 	case "create":
@@ -109,12 +126,12 @@ func (a *App) Run(args []string) int {
 		err = a.cmdRename(rest)
 	case "init":
 		err = a.cmdInit(rest)
+	case "migrate":
+		err = a.cmdMigrate(rest)
 	case "translate":
 		err = a.cmdTranslate(rest)
 	case "doctor":
 		err = a.cmdDoctor(rest)
-	case "switch":
-		err = a.cmdSwitchArgs(rest)
 	case "env":
 		err = a.cmdEnv(rest)
 	case "shell":
@@ -122,10 +139,14 @@ func (a *App) Run(args []string) int {
 	case "shell-init":
 		err = a.cmdShellInit()
 	default:
-		fmt.Fprintf(a.Stderr, "unknown command %q\n\n%s", cmd, usage)
+		a.unknownCommand(cmd)
 		return 2
 	}
 
+	if errors.Is(err, store.ErrV1State) {
+		fmt.Fprintf(a.Stderr, "claudectx: %v\n", err)
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "claudectx: %v\n", err)
 		return 1
@@ -133,25 +154,59 @@ func (a *App) Run(args []string) int {
 	return 0
 }
 
-// dispatch maps raw args to (command, remaining args). A bare first arg that
-// is not a known command is a switch target; "-" means previous.
+// dispatch maps raw args to (command, remaining args). Switching is always
+// per-tool ("claude"/"codex" subcommands); there is no bare-name switch.
 func dispatch(args []string) (string, []string) {
 	if len(args) == 0 {
-		return "list", nil
+		return "status", nil
 	}
 	first := args[0]
 	switch {
 	case first == "-h" || first == "--help" || first == "help":
 		return "help", nil
-	case first == "-":
-		return "switch", args
 	case store.Reserved[first]:
 		return first, args[1:]
+	case first == "-":
+		return first, args[1:] // per-tool guidance in unknownCommand
 	case strings.HasPrefix(first, "-"):
-		return "list", args // flags like --json fall through to list
+		return "status", args
 	default:
-		return "switch", args
+		return first, args[1:] // unknown — handled with guidance in Run
 	}
+}
+
+// unknownCommand explains the per-tool surface, suggesting a switch command
+// when the arg names an existing profile (old muscle memory from v1).
+func (a *App) unknownCommand(arg string) {
+	for _, t := range tool.All {
+		if a.S.Exists(t, arg) {
+			fmt.Fprintf(a.Stderr, "claudectx: switching is per-tool now — did you mean `claudectx %s %s`?\n", t, arg)
+			return
+		}
+	}
+	if arg == "-" {
+		fmt.Fprintf(a.Stderr, "claudectx: '-' is per-tool now: `claudectx claude -` or `claudectx codex -`\n")
+		return
+	}
+	fmt.Fprintf(a.Stderr, "unknown command %q\n\n%s", arg, usage)
+}
+
+// cmdTool handles `claudectx <tool> ...`: bare = list, "-" = previous,
+// otherwise switch.
+func (a *App) cmdTool(t tool.Tool, args []string) error {
+	var name string
+	for _, arg := range args {
+		if arg == "-" || !strings.HasPrefix(arg, "-") {
+			name = arg
+			break
+		}
+	}
+	if name == "" {
+		return a.listTool(t)
+	}
+	force := hasFlag(args, "--force") || hasFlag(args, "-f")
+	noKeychain := hasFlag(args, "--no-keychain")
+	return a.cmdSwitch(t, name, force, noKeychain)
 }
 
 // recoverIfNeeded rolls forward an interrupted journaled operation. Returns
@@ -161,6 +216,9 @@ func (a *App) recoverIfNeeded() (int, bool) {
 		return 0, false // pre-init commands give their own guidance
 	}
 	st, err := a.S.Load()
+	if errors.Is(err, store.ErrV1State) {
+		return 0, false // per-command Load surfaces the migrate guidance
+	}
 	if err != nil {
 		fmt.Fprintf(a.Stderr, "claudectx: %v\n", err)
 		return 1, true
@@ -175,6 +233,12 @@ func (a *App) recoverIfNeeded() (int, bool) {
 			fmt.Fprintf(a.Stderr, "claudectx: recovery failed: %v\n", err)
 			return 1, true
 		}
+	case "migrate":
+		m := migrate.New(a.P, a.S, a.Stderr)
+		if err := m.Recover(st); err != nil {
+			fmt.Fprintf(a.Stderr, "claudectx: migration recovery failed: %v\n", err)
+			return 1, true
+		}
 	case "init":
 		fmt.Fprintln(a.Stderr, "claudectx: a previous `init` was interrupted — run `claudectx init` to resume")
 		return 1, true
@@ -182,41 +246,24 @@ func (a *App) recoverIfNeeded() (int, bool) {
 	return 0, false
 }
 
-// cmdSwitchArgs parses `<name> [--force] [--no-keychain]` (name may be "-").
-func (a *App) cmdSwitchArgs(args []string) error {
-	force := hasFlag(args, "--force") || hasFlag(args, "-f")
-	noKeychain := hasFlag(args, "--no-keychain")
-	name := ""
-	for _, arg := range args {
-		if arg == "-" || !strings.HasPrefix(arg, "-") {
-			name = arg
-			break
-		}
-	}
-	if name == "" {
-		return fmt.Errorf("usage: claudectx <name> [--force] [--no-keychain]")
-	}
-	return a.cmdSwitch(name, force, noKeychain)
-}
-
-func (a *App) cmdSwitch(name string, force, noKeychain bool) error {
+func (a *App) cmdSwitch(t tool.Tool, name string, force, noKeychain bool) error {
 	st, err := a.S.Load()
 	if err != nil {
 		return err
 	}
+	axis := st.Axis(t)
 	if name == "-" {
-		if st.Previous == "" {
-			return fmt.Errorf("no previous context")
+		if axis.Previous == "" {
+			return fmt.Errorf("no previous %s profile", t)
 		}
-		name = st.Previous
+		name = axis.Previous
 	}
 
-	if a.P.TerminalContext != "" {
-		fmt.Fprintf(a.Stderr, "note: this terminal is pinned to %q via CLAUDE_CONFIG_DIR — the global switch won't affect it (`cx off` to unpin)\n",
-			a.P.TerminalContext)
+	if pin := a.P.TerminalPin(t); pin != "" {
+		fmt.Fprintf(a.Stderr, "note: this terminal pins %s to %q via env — the global switch won't affect it (`cx off` to unpin)\n", t, pin)
 	}
-	if procs := a.ProcScan(); len(procs) > 0 && !force {
-		fmt.Fprintf(a.Stderr, "warning: running processes are using the current context: %s\n", procs)
+	if procs := a.ProcScan(t); len(procs) > 0 && !force {
+		fmt.Fprintf(a.Stderr, "warning: running processes are using the current %s profile: %s\n", t, procs)
 		if !a.confirm("switch anyway?") {
 			return fmt.Errorf("aborted (use --force to skip this check)")
 		}
@@ -228,9 +275,9 @@ func (a *App) cmdSwitch(name string, force, noKeychain bool) error {
 		kc = keychain.Null{}
 	}
 	sw := switcher.New(p, a.S, kc, a.Stdout)
-	err = sw.Switch(name)
-	if err == switcher.ErrSameContext {
-		fmt.Fprintf(a.Stdout, "already on %q\n", name)
+	err = sw.Switch(t, name)
+	if errors.Is(err, switcher.ErrSameProfile) {
+		fmt.Fprintf(a.Stdout, "%s is already on %q\n", t, name)
 		return nil
 	}
 	return err
@@ -250,6 +297,11 @@ func (a *App) confirm(prompt string) bool {
 
 func (a *App) cmdInit(args []string) error {
 	yes := hasFlag(args, "--yes") || hasFlag(args, "-y")
+	if a.S.Initialized() {
+		if _, err := a.S.Load(); errors.Is(err, store.ErrV1State) {
+			return err
+		}
+	}
 	ad := adopt.New(a.P, a.S, a.Stdout)
 	items, err := ad.Plan()
 	if err != nil {
@@ -259,11 +311,31 @@ func (a *App) cmdInit(args []string) error {
 	for _, it := range items {
 		fmt.Fprintf(a.Stdout, "  %-40s (%s): %s\n", it.Live, it.Kind, it.Action)
 	}
-	fmt.Fprintf(a.Stdout, "  %-40s copy into context (live file stays, copy-swapped on switch)\n", a.P.ClaudeJSON)
+	fmt.Fprintf(a.Stdout, "  %-40s copy into claude profile (live file stays, copy-swapped on switch)\n", a.P.ClaudeJSON)
 	if !yes && !a.confirm("proceed?") {
 		return fmt.Errorf("aborted")
 	}
 	return ad.Run(items)
+}
+
+func (a *App) cmdMigrate(args []string) error {
+	yes := hasFlag(args, "--yes") || hasFlag(args, "-y")
+	m := migrate.New(a.P, a.S, a.Stdout)
+	plan, err := m.Plan()
+	if err != nil {
+		return err
+	}
+	if plan == nil {
+		return nil // already v2; Plan printed the message
+	}
+	m.PrintPlan(plan)
+	if ps := a.ProcScan(""); ps != "" {
+		fmt.Fprintf(a.Stderr, "note: running agents detected (%s). Migration uses atomic renames; open files keep working, but new opens during the (sub-millisecond) relink window could fail.\n", ps)
+	}
+	if !yes && !a.confirm("migrate now?") {
+		return fmt.Errorf("aborted")
+	}
+	return m.Run(plan)
 }
 
 func hasFlag(args []string, name string) bool {

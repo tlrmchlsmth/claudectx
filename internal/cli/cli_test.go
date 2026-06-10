@@ -12,6 +12,7 @@ import (
 	"github.com/tlrmchlsmth/claudectx/internal/keychain"
 	"github.com/tlrmchlsmth/claudectx/internal/store"
 	"github.com/tlrmchlsmth/claudectx/internal/testenv"
+	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
 
 type harness struct {
@@ -35,7 +36,7 @@ func newHarness(t *testing.T, build bool) *harness {
 		KC:     &keychain.Fake{FailOn: map[string]error{}},
 		Stdout: out, Stderr: errb, Stdin: strings.NewReader(""),
 		Version:  "test",
-		ProcScan: func() string { return "" },
+		ProcScan: func(tool.Tool) string { return "" },
 	}
 	return &harness{e: e, app: app, out: out, err: errb}
 }
@@ -71,211 +72,304 @@ func TestUninitializedGuidance(t *testing.T) {
 	}
 }
 
-func TestInitListCurrentFlow(t *testing.T) {
-	h := initialized(t)
-
-	out := h.mustRun(t, "list")
-	if !strings.Contains(out, "* default") {
-		t.Fatalf("list = %q", out)
-	}
-	if got := strings.TrimSpace(h.mustRun(t, "current")); got != "default" {
-		t.Fatalf("current = %q", got)
+func TestV1StateGuidance(t *testing.T) {
+	h := newHarness(t, false)
+	h.e.BuildV1ContextsTree()
+	for _, cmd := range [][]string{{"list"}, {"claude", "vertex"}, {"current"}} {
+		if code := h.run(t, cmd...); code == 0 {
+			t.Fatalf("%v on v1 state should fail", cmd)
+		}
+		if !strings.Contains(h.err.String(), "claudectx migrate") {
+			t.Fatalf("%v should point at migrate: %s", cmd, h.err.String())
+		}
 	}
 }
 
-func TestCreateSwitchBareNameAndDash(t *testing.T) {
+func TestStatusAndCurrent(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "create", "work", "--empty")
 
-	// Bare-name dispatch.
-	out := h.mustRun(t, "work")
-	if !strings.Contains(out, `Switched to "work"`) {
+	out := h.mustRun(t)
+	if !strings.Contains(out, "claude: default") || !strings.Contains(out, "codex:  default") {
+		t.Fatalf("status = %q", out)
+	}
+	out = h.mustRun(t, "current")
+	if !strings.Contains(out, "claude: default") {
+		t.Fatalf("current = %q", out)
+	}
+	if got := strings.TrimSpace(h.mustRun(t, "current", "claude")); got != "default" {
+		t.Fatalf("current claude = %q", got)
+	}
+}
+
+func TestPerToolSwitchAndDash(t *testing.T) {
+	h := initialized(t)
+	h.mustRun(t, "create", "claude", "work")
+	h.mustRun(t, "create", "codex", "personal")
+
+	out := h.mustRun(t, "claude", "work")
+	if !strings.Contains(out, `Switched claude to "work"`) {
 		t.Fatalf("switch output: %q", out)
 	}
-	if got := strings.TrimSpace(h.mustRun(t, "current")); got != "work" {
-		t.Fatalf("current = %q", got)
-	}
-	// Empty context seeded onboarding flags from the old live claude.json.
-	live, _ := os.ReadFile(h.e.P.ClaudeJSON)
-	var lj map[string]any
-	json.Unmarshal(live, &lj)
-	if lj["hasCompletedOnboarding"] != true {
-		t.Fatalf("onboarding seed missing: %s", live)
+	// Codex axis untouched.
+	if got := strings.TrimSpace(h.mustRun(t, "current", "codex")); got != "default" {
+		t.Fatalf("codex current after claude switch = %q", got)
 	}
 
-	// Dash returns to previous.
-	out = h.mustRun(t, "-")
-	if !strings.Contains(out, `Switched to "default"`) {
-		t.Fatalf("dash output: %q", out)
+	h.mustRun(t, "codex", "personal")
+	if got := strings.TrimSpace(h.mustRun(t, "current", "codex")); got != "personal" {
+		t.Fatalf("codex current = %q", got)
 	}
-	// Dash again bounces back.
-	h.mustRun(t, "-")
-	if got := strings.TrimSpace(h.mustRun(t, "current")); got != "work" {
-		t.Fatalf("after double dash current = %q", got)
+	// Claude axis untouched by the codex switch.
+	if got := strings.TrimSpace(h.mustRun(t, "current", "claude")); got != "work" {
+		t.Fatalf("claude current = %q", got)
+	}
+
+	// Per-axis dash.
+	out = h.mustRun(t, "claude", "-")
+	if !strings.Contains(out, `Switched claude to "default"`) {
+		t.Fatalf("claude dash output: %q", out)
+	}
+	if got := strings.TrimSpace(h.mustRun(t, "current", "codex")); got != "personal" {
+		t.Fatalf("claude dash moved codex: %q", got)
+	}
+	out = h.mustRun(t, "codex", "-")
+	if !strings.Contains(out, `Switched codex to "default"`) {
+		t.Fatalf("codex dash output: %q", out)
 	}
 }
 
-func TestSwitchToUnknownNameFails(t *testing.T) {
+func TestBareToolListsProfiles(t *testing.T) {
 	h := initialized(t)
-	if code := h.run(t, "nope"); code == 0 {
-		t.Fatal("switching to unknown context should fail")
+	h.mustRun(t, "create", "claude", "work")
+	out := h.mustRun(t, "claude")
+	if !strings.Contains(out, "* default") || !strings.Contains(out, "  work") {
+		t.Fatalf("claude list = %q", out)
 	}
-	if !strings.Contains(h.err.String(), "no such context") {
+}
+
+func TestNoBareNameSwitch(t *testing.T) {
+	h := initialized(t)
+	h.mustRun(t, "create", "claude", "work")
+	// v1 muscle memory: bare profile name must NOT switch, but should hint.
+	if code := h.run(t, "work"); code != 2 {
+		t.Fatalf("bare-name switch exit = %d, want 2", code)
+	}
+	if !strings.Contains(h.err.String(), "claudectx claude work") {
+		t.Fatalf("should suggest the per-tool command: %s", h.err.String())
+	}
+	if got := strings.TrimSpace(h.mustRun(t, "current", "claude")); got != "default" {
+		t.Fatal("bare name switched anyway")
+	}
+	// Bare dash likewise.
+	if code := h.run(t, "-"); code != 2 {
+		t.Fatalf("bare dash exit = %d", code)
+	}
+	if !strings.Contains(h.err.String(), "claudectx claude -") {
+		t.Fatalf("dash guidance: %s", h.err.String())
+	}
+}
+
+func TestSwitchToUnknownProfileFails(t *testing.T) {
+	h := initialized(t)
+	if code := h.run(t, "claude", "nope"); code == 0 {
+		t.Fatal("switching to unknown profile should fail")
+	}
+	if !strings.Contains(h.err.String(), "no such claude profile") {
 		t.Fatalf("err = %q", h.err.String())
 	}
 }
 
-func TestCreateFromCopiesWithoutSecrets(t *testing.T) {
+func TestListJSON(t *testing.T) {
 	h := initialized(t)
-	// Plant all three credential stores in the source; none may be cloned.
-	h.e.WriteFile(h.e.P.CtxKeychainStash("default"), `{"password":"tok"}`)
-	codexAuth := filepath.Join(h.e.P.CtxCodexDir("default"), "auth.json")
-	h.e.WriteFile(codexAuth, `{"OPENAI_API_KEY":"sk-secret"}`)
-	claudeCreds := filepath.Join(h.e.P.CtxClaudeDir("default"), ".credentials.json")
-	h.e.WriteFile(claudeCreds, `{"token":"oauth"}`)
-
-	h.mustRun(t, "create", "clone", "--from", "default")
-	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("clone"), "settings.json")); err != nil {
-		t.Fatal("clone missing copied settings.json")
+	h.mustRun(t, "create", "codex", "personal")
+	var parsed map[string]struct {
+		Current  string   `json:"current"`
+		Profiles []string `json:"profiles"`
 	}
-	if _, err := os.Stat(h.e.P.CtxKeychainStash("clone")); err == nil {
-		t.Fatal("secrets were copied into clone")
+	if err := json.Unmarshal([]byte(h.mustRun(t, "list", "--json")), &parsed); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(h.e.P.CtxCodexDir("clone"), "auth.json")); err == nil {
-		t.Fatal("codex auth.json (API key) was copied into clone")
-	}
-	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("clone"), ".credentials.json")); err == nil {
-		t.Fatal("claude .credentials.json was copied into clone")
-	}
-	// Internal symlinks preserved: make one and re-copy.
-	os.Symlink("/tmp", filepath.Join(h.e.P.CtxClaudeDir("default"), "linky"))
-	h.mustRun(t, "create", "clone2", "--from", "default")
-	fi, err := os.Lstat(filepath.Join(h.e.P.CtxClaudeDir("clone2"), "linky"))
-	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatal("internal symlink not preserved as symlink")
+	if parsed["claude"].Current != "default" || len(parsed["codex"].Profiles) != 2 {
+		t.Fatalf("parsed = %+v", parsed)
 	}
 }
 
 func TestCreateDefaultsToEmpty(t *testing.T) {
 	h := initialized(t)
-	// default has settings.json + skills from BuildClaudeTree.
-	h.mustRun(t, "create", "fresh")
-	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("fresh"), "settings.json")); err == nil {
+	h.mustRun(t, "create", "claude", "fresh")
+	if _, err := os.Stat(filepath.Join(h.e.P.ProfileHome(tool.Claude, "fresh"), "settings.json")); err == nil {
 		t.Fatal("bare `create` cloned settings.json; default should be empty")
 	}
-	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("fresh"), "skills")); err == nil {
-		t.Fatal("bare `create` cloned skills; default should be empty")
-	}
 	// But onboarding flags are still seeded so Claude skips first-run setup.
-	data, err := os.ReadFile(h.e.P.CtxClaudeJSON("fresh"))
-	if err != nil {
-		t.Fatal(err)
+	data, err := os.ReadFile(h.e.P.ProfileClaudeJSON("fresh"))
+	if err != nil || !strings.Contains(string(data), "hasCompletedOnboarding") {
+		t.Fatalf("empty profile not seeded: %s, %v", data, err)
 	}
-	if !strings.Contains(string(data), "hasCompletedOnboarding") {
-		t.Fatalf("empty context not seeded with onboarding flags: %s", data)
+	// Codex empty profile: no seeding, just the home dir.
+	h.mustRun(t, "create", "codex", "fresh")
+	entries, _ := os.ReadDir(h.e.P.ProfileHome(tool.Codex, "fresh"))
+	if len(entries) != 0 {
+		t.Fatalf("codex empty profile has content: %v", entries)
 	}
-	// `--from` with no value clones the current context.
-	h.mustRun(t, "create", "cloned", "--from")
-	if _, err := os.Stat(filepath.Join(h.e.P.CtxClaudeDir("cloned"), "settings.json")); err != nil {
-		t.Fatal("`--from` with no value should clone the current context")
+}
+
+func TestCreateFromCopiesWithoutCredentials(t *testing.T) {
+	h := initialized(t)
+	// Plant all three credential stores in the sources; none may be cloned.
+	h.e.WriteFile(h.e.P.KeychainStash("default"), `{"password":"tok"}`)
+	h.e.WriteFile(filepath.Join(h.e.P.ProfileHome(tool.Claude, "default"), ".credentials.json"), `{"token":"oauth"}`)
+	// codex default already has auth.json from BuildModernCodexTree.
+
+	h.mustRun(t, "create", "claude", "clone", "--from", "default")
+	if _, err := os.Stat(filepath.Join(h.e.P.ProfileHome(tool.Claude, "clone"), "settings.json")); err != nil {
+		t.Fatal("clone missing copied settings.json")
+	}
+	if _, err := os.Stat(h.e.P.KeychainStash("clone")); err == nil {
+		t.Fatal("keychain stash was cloned")
+	}
+	if _, err := os.Stat(filepath.Join(h.e.P.ProfileHome(tool.Claude, "clone"), ".credentials.json")); err == nil {
+		t.Fatal("claude .credentials.json was cloned")
+	}
+
+	h.mustRun(t, "create", "codex", "clone", "--from", "default")
+	if _, err := os.Stat(filepath.Join(h.e.P.ProfileHome(tool.Codex, "clone"), "config.toml")); err != nil {
+		t.Fatal("codex clone missing config.toml")
+	}
+	if _, err := os.Stat(filepath.Join(h.e.P.ProfileHome(tool.Codex, "clone"), "auth.json")); err == nil {
+		t.Fatal("codex auth.json (API key) was cloned")
+	}
+
+	// `--from` with no value clones the current profile.
+	h.mustRun(t, "create", "claude", "clone2", "--from")
+	if _, err := os.Stat(filepath.Join(h.e.P.ProfileHome(tool.Claude, "clone2"), "settings.json")); err != nil {
+		t.Fatal("`--from` with no value should clone the current profile")
 	}
 }
 
 func TestCreateRejectsReservedAndDuplicate(t *testing.T) {
 	h := initialized(t)
-	if code := h.run(t, "create", "delete"); code == 0 {
-		t.Fatal("reserved name accepted")
+	for _, name := range []string{"delete", "claude", "codex", "migrate"} {
+		if code := h.run(t, "create", "claude", name); code == 0 {
+			t.Fatalf("reserved name %q accepted", name)
+		}
 	}
-	h.mustRun(t, "create", "work", "--empty")
-	if code := h.run(t, "create", "work", "--empty"); code == 0 {
+	h.mustRun(t, "create", "claude", "work")
+	if code := h.run(t, "create", "claude", "work"); code == 0 {
 		t.Fatal("duplicate name accepted")
 	}
+	// Same name on the OTHER axis is fine — separate namespaces.
+	h.mustRun(t, "create", "codex", "work")
 }
 
 func TestDeleteGuards(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "create", "work", "--empty")
+	h.mustRun(t, "create", "claude", "work")
 
-	// Refuses the active context.
-	if code := h.run(t, "delete", "default", "--yes"); code == 0 {
-		t.Fatal("deleted the active context")
+	// Refuses the active profile on that axis.
+	if code := h.run(t, "delete", "claude", "default", "--yes"); code == 0 {
+		t.Fatal("deleted the active profile")
 	}
 	// Without --yes and a non-confirming stdin: aborted.
-	if code := h.run(t, "delete", "work"); code == 0 {
+	if code := h.run(t, "delete", "claude", "work"); code == 0 {
 		t.Fatal("delete proceeded without confirmation")
 	}
 	// With --yes: trashed, not erased.
-	out := h.mustRun(t, "delete", "work", "--yes")
+	out := h.mustRun(t, "delete", "claude", "work", "--yes")
 	if !strings.Contains(out, "recoverable at") {
 		t.Fatalf("delete output: %q", out)
 	}
 	entries, _ := os.ReadDir(h.e.P.BackupsDir())
 	found := false
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "work.deleted.") {
+		if strings.HasPrefix(e.Name(), "claude.work.deleted.") {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("trashed context not in backups/")
+		t.Fatal("trashed profile not in backups/")
 	}
 }
 
-func TestRenameActiveContextRelinks(t *testing.T) {
+func TestRenameActiveProfileRelinks(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "rename", "default", "main")
-	if got := strings.TrimSpace(h.mustRun(t, "current")); got != "main" {
+	h.mustRun(t, "rename", "claude", "default", "main")
+	if got := strings.TrimSpace(h.mustRun(t, "current", "claude")); got != "main" {
 		t.Fatalf("current = %q", got)
 	}
-	// Links must already point at the renamed dir (switch would catch drift).
+	// Link repointed; codex axis untouched.
 	target, err := os.Readlink(h.e.P.ClaudeDir)
-	if err != nil || !strings.Contains(target, "/main/") {
+	if err != nil || !strings.Contains(target, "/claude/main/") {
 		t.Fatalf("claude link = %q, %v", target, err)
 	}
-	// And a subsequent switch works.
-	h.mustRun(t, "create", "tmp", "--empty")
-	h.mustRun(t, "tmp")
-	h.mustRun(t, "main")
+	if got := strings.TrimSpace(h.mustRun(t, "current", "codex")); got != "default" {
+		t.Fatalf("codex current = %q", got)
+	}
+	// Subsequent switching works.
+	h.mustRun(t, "create", "claude", "tmp")
+	h.mustRun(t, "claude", "tmp")
+	h.mustRun(t, "claude", "main")
 }
 
-func TestShowSummaries(t *testing.T) {
+func TestRenameActiveWithRunningAgents(t *testing.T) {
 	h := initialized(t)
-	out := h.mustRun(t, "show")
-	for _, want := range []string{"context: default (current)", "crashlog", "atlassian", "auth.json:   present"} {
+	h.app.ProcScan = func(tool.Tool) string { return "2 claude (pids 1, 2)" }
+	if code := h.run(t, "rename", "claude", "default", "main"); code == 0 {
+		t.Fatal("rename proceeded without confirmation")
+	}
+	h.mustRun(t, "rename", "claude", "default", "main", "--force")
+	if got := strings.TrimSpace(h.mustRun(t, "current", "claude")); got != "main" {
+		t.Fatalf("current = %q", got)
+	}
+}
+
+func TestShowPerTool(t *testing.T) {
+	h := initialized(t)
+	out := h.mustRun(t, "show", "claude")
+	for _, want := range []string{"claude profile: default (current)", "crashlog", "files"} {
 		if !strings.Contains(out, want) {
-			t.Fatalf("show output missing %q:\n%s", want, out)
+			t.Fatalf("show claude missing %q:\n%s", want, out)
 		}
 	}
-	// JSON mode parses and carries skills.
-	var parsed struct {
-		ClaudeSkills []string `json:"claude_skills"`
-		MCPServers   []string `json:"mcp_servers"`
+	out = h.mustRun(t, "show", "codex")
+	for _, want := range []string{"codex profile: default (current)", "auth.json:   present", "deploy", "search"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("show codex missing %q:\n%s", want, out)
+		}
 	}
-	if err := json.Unmarshal([]byte(h.mustRun(t, "show", "--json")), &parsed); err != nil {
+	var parsed struct {
+		Skills []string `json:"skills"`
+	}
+	if err := json.Unmarshal([]byte(h.mustRun(t, "show", "claude", "--json")), &parsed); err != nil {
 		t.Fatal(err)
 	}
-	if len(parsed.ClaudeSkills) != 2 || len(parsed.MCPServers) != 2 {
+	if len(parsed.Skills) != 2 {
 		t.Fatalf("parsed = %+v", parsed)
 	}
 }
 
 func TestRunningProcessWarningBlocksWithoutConfirm(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "create", "work", "--empty")
-	h.app.ProcScan = func() string { return "claude(pid 123)" }
-	if code := h.run(t, "work"); code == 0 {
+	h.mustRun(t, "create", "claude", "work")
+	h.app.ProcScan = func(t tool.Tool) string {
+		if t == tool.Claude || t == "" {
+			return "1 claude (pid 123)"
+		}
+		return ""
+	}
+	if code := h.run(t, "claude", "work"); code == 0 {
 		t.Fatal("switch proceeded despite running agent and no confirmation")
 	}
-	if !strings.Contains(h.err.String(), "claude(pid 123)") {
-		t.Fatalf("warning missing: %s", h.err.String())
+	// The codex axis doesn't warn for claude processes.
+	h.mustRun(t, "create", "codex", "work")
+	if code := h.run(t, "codex", "work"); code != 0 {
+		t.Fatalf("codex switch blocked by claude process: %s", h.err.String())
 	}
-	// Confirming proceeds.
+	// Confirming proceeds; --force skips entirely.
 	h.app.Stdin = strings.NewReader("y\n")
-	if code := h.run(t, "work"); code != 0 {
+	if code := h.run(t, "claude", "work"); code != 0 {
 		t.Fatalf("confirmed switch failed: %s", h.err.String())
 	}
-	// --force after a bare name skips the prompt entirely.
-	if code := h.run(t, "default", "--force"); code != 0 {
+	if code := h.run(t, "claude", "default", "--force"); code != 0 {
 		t.Fatalf("--force switch failed: %s", h.err.String())
 	}
 	if strings.Contains(h.err.String(), "switch anyway?") {
@@ -285,91 +379,73 @@ func TestRunningProcessWarningBlocksWithoutConfirm(t *testing.T) {
 
 func TestInterruptedSwitchRecoversOnNextCommand(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "create", "work", "--empty")
+	h.mustRun(t, "create", "claude", "work")
 
-	// Plant a mid-switch journal as if we crashed at the links step.
 	st, err := h.app.S.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.app.S.SetJournal(st, &store.Journal{Op: "switch", From: "default", To: "work", Step: "links"}); err != nil {
+	if err := h.app.S.SetJournal(st, &store.Journal{Op: "switch", Tool: "claude", From: "default", To: "work", Step: "links"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Any command triggers recovery first.
-	out := h.mustRun(t, "current")
+	out := h.mustRun(t, "current", "claude")
 	if strings.TrimSpace(out) != "work" {
 		t.Fatalf("current after recovery = %q (stderr: %s)", out, h.err.String())
 	}
 }
 
-func TestEnvCommand(t *testing.T) {
+func TestEnvCommandPerTool(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "create", "work", "--empty")
+	h.mustRun(t, "create", "codex", "work")
 
-	out := h.mustRun(t, "env", "work")
-	if !strings.Contains(out, "export CLAUDE_CONFIG_DIR=") ||
-		!strings.Contains(out, filepath.Join("contexts", "work", "claude")) {
+	out := h.mustRun(t, "env", "codex", "work")
+	if !strings.Contains(out, "export CODEX_HOME=") ||
+		!strings.Contains(out, filepath.Join("profiles", "codex", "work", "home")) {
 		t.Fatalf("env output: %q", out)
 	}
-	if !strings.Contains(out, "export CODEX_HOME=") {
-		t.Fatalf("env output missing CODEX_HOME: %q", out)
+	if strings.Contains(out, "CLAUDE_CONFIG_DIR") {
+		t.Fatal("codex pin must not touch the claude var")
 	}
-	// Unknown context fails.
-	if code := h.run(t, "env", "nope"); code == 0 {
-		t.Fatal("env for unknown context succeeded")
+	out = h.mustRun(t, "env", "claude", "default")
+	if !strings.Contains(out, "export CLAUDE_CONFIG_DIR=") {
+		t.Fatalf("env claude output: %q", out)
 	}
-	// Unset prints an unset line.
+	if code := h.run(t, "env", "codex", "nope"); code == 0 {
+		t.Fatal("env for unknown profile succeeded")
+	}
 	if out := h.mustRun(t, "env", "--unset"); !strings.Contains(out, "unset CLAUDE_CONFIG_DIR CODEX_HOME") {
 		t.Fatalf("unset output: %q", out)
 	}
+	if out := h.mustRun(t, "env", "--unset", "codex"); strings.TrimSpace(out) != "unset CODEX_HOME" {
+		t.Fatalf("per-tool unset output: %q", out)
+	}
 }
 
-func TestTerminalPinnedCurrentAndList(t *testing.T) {
+func TestTerminalPinnedCurrentAndStatus(t *testing.T) {
 	h := initialized(t)
-	h.mustRun(t, "create", "work", "--empty")
-	h.app.P.TerminalContext = "work" // as paths.FromEnv would set in a pinned terminal
+	h.mustRun(t, "create", "codex", "work")
+	h.app.P.TerminalCodex = "work" // as paths.FromEnv would set in a pinned terminal
 
-	if got := strings.TrimSpace(h.mustRun(t, "current")); got != "work" {
+	if got := strings.TrimSpace(h.mustRun(t, "current", "codex")); got != "work" {
 		t.Fatalf("pinned current = %q, want work", got)
 	}
-	out := h.mustRun(t, "list")
-	if !strings.Contains(out, "work  (this terminal)") {
-		t.Fatalf("list missing terminal marker:\n%s", out)
+	// The other axis is unaffected.
+	if got := strings.TrimSpace(h.mustRun(t, "current", "claude")); got != "default" {
+		t.Fatalf("claude current = %q", got)
 	}
-	if !strings.Contains(out, `pinned to "work"`) {
-		t.Fatalf("list missing pin explanation:\n%s", out)
-	}
-}
-
-func TestEnvIsReservedName(t *testing.T) {
-	h := initialized(t)
-	for _, name := range []string{"env", "shell", "shell-init"} {
-		if code := h.run(t, "create", name, "--empty"); code == 0 {
-			t.Fatalf("reserved name %q accepted as context", name)
-		}
+	out := h.mustRun(t)
+	if !strings.Contains(out, "[this terminal: work]") {
+		t.Fatalf("status missing pin note:\n%s", out)
 	}
 }
 
 func TestShellInit(t *testing.T) {
 	h := newHarness(t, false)
 	out := h.mustRun(t, "shell-init")
-	if !strings.Contains(out, "cx()") || !strings.Contains(out, "claudectx env") {
+	if !strings.Contains(out, "cx()") || !strings.Contains(out, "claude|codex") {
 		t.Fatalf("shell-init output: %q", out)
-	}
-}
-
-func TestRenameActiveWithRunningAgents(t *testing.T) {
-	h := initialized(t)
-	h.app.ProcScan = func() string { return "2 claude (pids 1, 2)" }
-	// Non-confirming stdin: aborted.
-	if code := h.run(t, "rename", "default", "main"); code == 0 {
-		t.Fatal("rename proceeded without confirmation")
-	}
-	// --force skips the check.
-	h.mustRun(t, "rename", "default", "main", "--force")
-	if got := strings.TrimSpace(h.mustRun(t, "current")); got != "main" {
-		t.Fatalf("current = %q", got)
 	}
 }
 
@@ -380,11 +456,5 @@ func TestVersionAndHelp(t *testing.T) {
 	}
 	if out := h.mustRun(t, "--help"); !strings.Contains(out, "Usage:") {
 		t.Fatalf("help = %q", out)
-	}
-	if code := h.run(t); code != 0 {
-		// no args pre-init: list fails with guidance, which is acceptable
-		if !strings.Contains(h.err.String(), "init") {
-			t.Fatalf("bare run pre-init: %s", h.err.String())
-		}
 	}
 }
