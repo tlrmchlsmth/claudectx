@@ -47,6 +47,10 @@ Usage:
   claudectx shell-init            print a 'cx' helper for your shell rc
   claudectx completion <bash|zsh|fish>
                                   print a tab-completion script
+  claudectx inject <claude|codex> [profile] <pod/NAME|docker:NAME|podman:NAME|dir:PATH>
+            [-n <namespace>] [-c <container>] [--dest <path>]
+            [--with-creds] [--with-refresh-token] [--dry-run]
+                                  copy a profile into a container's config dir
   claudectx translate <claude-to-codex|codex-to-claude>
             [--claude <profile>] [--codex <profile>]
             [--only instructions,skills,mcp,settings]
@@ -75,6 +79,9 @@ type App struct {
 	// ProcScan reports running agent processes for a tool ("" = all;
 	// testable seam).
 	ProcScan func(t tool.Tool) string
+	// Exec runs external commands for inject transports (kubectl, docker);
+	// nil means the real default (testable seam).
+	Exec CmdRunner
 }
 
 func NewApp(p paths.Paths, version string) *App {
@@ -137,6 +144,8 @@ func (a *App) Run(args []string) int {
 		err = a.cmdTranslate(rest)
 	case "doctor":
 		err = a.cmdDoctor(rest)
+	case "inject":
+		err = a.cmdInject(rest)
 	case "env":
 		err = a.cmdEnv(rest)
 	case "shell":
