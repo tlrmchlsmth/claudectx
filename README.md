@@ -160,6 +160,7 @@ passed as command-line arguments.
 | `claudectx rename <tool> <old> <new> [--force]` | rename (relinks if active) |
 | `eval "$(claudectx env <tool> <name>)"` / `claudectx shell …` | pin one terminal |
 | `claudectx inject <tool> [name] <target>` | copy a profile into a container (below) |
+| `claudectx exec <tool> [name] <target> [-- cmd]` | container session, credential in env only (below) |
 | `claudectx translate <direction>` | convert config between the tools (below) |
 | `claudectx migrate` | upgrade a v1 paired-context install (below) |
 | `claudectx doctor [--fix]` | verify symlinks, perms, state consistency |
@@ -190,6 +191,18 @@ until the token expires, then asks to log in; re-run `inject` to refresh.
 The long-lived refresh token stays in your keychain, so anyone who can
 `kubectl exec` into the pod can only steal a token that dies on its own in
 hours. `--with-refresh-token` opts out for long-lived personal containers.
+
+For **shared pods**, `exec` goes one step further — config is synced, but
+the credential lives only in your session's environment
+(`CLAUDE_CODE_OAUTH_TOKEN` / `OPENAI_API_KEY`), handed over via a
+RAM-backed file consumed before your command starts. Nothing
+credential-shaped touches the container filesystem; when your session
+ends, there's nothing to find:
+
+```sh
+claudectx exec claude work pod/foo -n dev     # config synced, then: claude
+claudectx exec claude pod/foo -- bash         # or any command
+```
 
 For durable in-cluster use, prefer credentials that don't expire or rot: a
 Vertex profile (auth is plain `settings.json` env — with GKE Workload

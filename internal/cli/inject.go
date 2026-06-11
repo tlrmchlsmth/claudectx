@@ -230,18 +230,7 @@ func destLabel(t tool.Tool, dest string) string {
 
 // execArgv builds the runtime command that receives the tar on stdin.
 func (t injectTarget) execArgv(ns, ctr, script string) (string, []string) {
-	if t.kind == "pod" {
-		argv := []string{"exec", "-i"}
-		if ns != "" {
-			argv = append(argv, "-n", ns)
-		}
-		if ctr != "" {
-			argv = append(argv, "-c", ctr)
-		}
-		argv = append(argv, t.name, "--", "sh", "-c", script)
-		return "kubectl", argv
-	}
-	return t.kind, []string{"exec", "-i", t.name, "sh", "-c", script}
+	return t.shArgv(ns, ctr, false, "sh", "-c", script)
 }
 
 func humanBytes(n int64) string {
