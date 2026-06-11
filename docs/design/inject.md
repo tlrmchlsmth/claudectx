@@ -103,12 +103,42 @@ Distroless images fail with a clear error.
 `inject` is idempotent: re-running refreshes whatever is there. Re-inject to
 renew an expired access token, or after changing your profile.
 
+## `claudectx exec` — sessions for shared pods
+
+For pods other people can exec into, even an access-token file is more
+exposure than necessary. `exec` is the session-scoped sibling of inject:
+
+```sh
+claudectx exec claude work pod/foo -n dev          # config synced, then: claude
+claudectx exec claude pod/foo -- bash              # custom command
+```
+
+It syncs the *config* snapshot (never credentials), then opens an exec
+session with the credential held only in that session's environment —
+`CLAUDE_CODE_OAUTH_TOKEN` (the access token) or `OPENAI_API_KEY`. Nothing
+credential-shaped is left on the container filesystem: when your session
+ends, there is nothing to find.
+
+Delivery mechanics: the token is piped over stdin into a 0600 file on
+`/dev/shm` (RAM-backed; `/tmp` fallback), which the session script reads
+into the env and removes before exec'ing your command — it exists for the
+instant between the two execs and never appears on any argv, host or
+container. If the session fails to start, a best-effort cleanup exec
+removes the handoff file. Residual exposure: someone exec'd in *while your
+session runs* can read your process's environ (same-UID containers); gone
+when you leave.
+
+A session command's own exit status passes through claudectx silently, so
+`claudectx exec ... -- claude -p "..."` is scriptable.
+
+Profiles with no env-deliverable credential (Vertex, API-key-in-settings,
+Codex ChatGPT logins) run config-only sessions — for Vertex/settings
+profiles that is already a fully working session.
+
 ## Non-goals (now)
 
 - **K8s manifest generation** (Secret + initContainer): adds `secrets get`
   RBAC and etcd as extra credential readers — strictly worse under the
   exec threat model. Reconsider if declarative workflows demand it.
 - **Two-way sync** of container-side state back to the profile.
-- **A `claudectx exec` session wrapper** (config injected, credential held
-  only in the exec session env): the right next step for shared pods.
 - **Auto-refresh daemons.** Re-running inject is the refresh.

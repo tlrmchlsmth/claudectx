@@ -295,6 +295,48 @@ func stripRefresh(raw []byte, keep bool) ([]byte, CredStatus) {
 	return append(data, '\n'), st
 }
 
+// EnvCredential resolves a profile's credential to the env-var form both
+// tools honor for headless auth — the delivery `claudectx exec` uses so no
+// credential ever touches the target filesystem. Returns an empty value
+// when the profile has no env-deliverable credential (no login, or a
+// Codex ChatGPT login, which only works as a file).
+func EnvCredential(p paths.Paths, kc keychain.Backend, t tool.Tool, name string, current bool) (envVar, value string, expires time.Time, err error) {
+	if t == tool.Codex {
+		data, err := os.ReadFile(filepath.Join(p.ProfileHome(tool.Codex, name), "auth.json"))
+		if errors.Is(err, os.ErrNotExist) {
+			return "", "", time.Time{}, nil
+		}
+		if err != nil {
+			return "", "", time.Time{}, err
+		}
+		var auth struct {
+			Key string `json:"OPENAI_API_KEY"`
+		}
+		if json.Unmarshal(data, &auth) != nil || auth.Key == "" {
+			return "", "", time.Time{}, nil
+		}
+		return "OPENAI_API_KEY", auth.Key, time.Time{}, nil
+	}
+
+	raw, _, err := claudeCredential(p, kc, name, current)
+	if err != nil || raw == nil {
+		return "", "", time.Time{}, err
+	}
+	var m struct {
+		OAuth struct {
+			AccessToken string  `json:"accessToken"`
+			ExpiresAt   float64 `json:"expiresAt"`
+		} `json:"claudeAiOauth"`
+	}
+	if json.Unmarshal(raw, &m) != nil || m.OAuth.AccessToken == "" {
+		return "", "", time.Time{}, nil
+	}
+	if m.OAuth.ExpiresAt > 0 {
+		expires = time.UnixMilli(int64(m.OAuth.ExpiresAt))
+	}
+	return "CLAUDE_CODE_OAUTH_TOKEN", m.OAuth.AccessToken, expires, nil
+}
+
 // TotalBytes is the snapshot's payload size, for reporting.
 func (s *Snapshot) TotalBytes() int64 {
 	var n int64

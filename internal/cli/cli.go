@@ -51,6 +51,11 @@ Usage:
             [-n <namespace>] [-c <container>] [--dest <path>]
             [--with-creds] [--with-refresh-token] [--dry-run]
                                   copy a profile into a container's config dir
+  claudectx exec <claude|codex> [profile] <pod/NAME|docker:NAME|podman:NAME>
+            [-n <namespace>] [-c <container>] [-- <command>...]
+                                  session in the container: config synced, the
+                                  credential only in the session's env — never
+                                  on the container filesystem
   claudectx translate <claude-to-codex|codex-to-claude>
             [--claude <profile>] [--codex <profile>]
             [--only instructions,skills,mcp,settings]
@@ -146,6 +151,8 @@ func (a *App) Run(args []string) int {
 		err = a.cmdDoctor(rest)
 	case "inject":
 		err = a.cmdInject(rest)
+	case "exec":
+		err = a.cmdExecSession(rest)
 	case "env":
 		err = a.cmdEnv(rest)
 	case "shell":
@@ -161,6 +168,12 @@ func (a *App) Run(args []string) int {
 		return 2
 	}
 
+	// A session command's own exit status passes through silently — that
+	// failure belongs to the command the user ran, not to claudectx.
+	var ec exitCodeError
+	if errors.As(err, &ec) {
+		return ec.code
+	}
 	if errors.Is(err, store.ErrV1State) {
 		fmt.Fprintf(a.Stderr, "claudectx: %v\n", err)
 		return 1
