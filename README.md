@@ -159,10 +159,43 @@ passed as command-line arguments.
 | `claudectx delete <tool> <name>` | confirm, then move to `backups/` (never `rm -rf`) |
 | `claudectx rename <tool> <old> <new> [--force]` | rename (relinks if active) |
 | `eval "$(claudectx env <tool> <name>)"` / `claudectx shell …` | pin one terminal |
+| `claudectx inject <tool> [name] <target>` | copy a profile into a container (below) |
 | `claudectx translate <direction>` | convert config between the tools (below) |
 | `claudectx migrate` | upgrade a v1 paired-context install (below) |
 | `claudectx doctor [--fix]` | verify symlinks, perms, state consistency |
 | `claudectx completion <bash\|zsh\|fish>` | print a tab-completion script |
+
+## Containers
+
+`inject` lands a profile in a container's config dir, so the tool inside
+just works — no env vars needed:
+
+```sh
+claudectx inject claude pod/vllm-decode-0 -n dev    # k8s (via kubectl exec)
+claudectx inject claude work docker:a1b2c3          # docker / podman:NAME
+claudectx inject codex dir:./cfg                    # local dir, for mounts
+```
+
+What travels: settings, skills, agents, `CLAUDE.md`/`AGENTS.md`, MCP config
+(`.claude.json` with the per-host `projects` key stripped). What doesn't:
+transcript history, todos, caches, logs — host-private noise that is most
+of the bytes. The snapshot is one-way; nothing syncs back. The target needs
+`sh` and `tar` (same as `kubectl cp`). Re-running `inject` refreshes.
+
+Credentials are opt-in (`--with-creds`) and travel only inside the exec
+stream — never argv, never a file at rest. For Claude OAuth logins, only
+the short-lived **access token** is sent (translated to the
+`.credentials.json` form Linux expects): claude in the container works
+until the token expires, then asks to log in; re-run `inject` to refresh.
+The long-lived refresh token stays in your keychain, so anyone who can
+`kubectl exec` into the pod can only steal a token that dies on its own in
+hours. `--with-refresh-token` opts out for long-lived personal containers.
+
+For durable in-cluster use, prefer credentials that don't expire or rot: a
+Vertex profile (auth is plain `settings.json` env — with GKE Workload
+Identity the pod holds no secret material at all) or an API-key profile.
+Those inject as pure config, once per pod. Design notes:
+[docs/design/inject.md](docs/design/inject.md).
 
 ## Translation
 

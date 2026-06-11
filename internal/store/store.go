@@ -23,7 +23,7 @@ var Reserved = map[string]bool{
 	"rename": true, "show": true, "init": true, "translate": true,
 	"doctor": true, "switch": true, "version": true, "help": true,
 	"env": true, "shell": true, "shell-init": true, "completion": true,
-	"claude": true, "codex": true, "migrate": true,
+	"claude": true, "codex": true, "migrate": true, "inject": true,
 }
 
 var nameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
