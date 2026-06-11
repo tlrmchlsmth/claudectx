@@ -10,7 +10,7 @@ import (
 // commands lists the user-facing subcommands in completion order.
 var commands = []string{
 	"claude", "codex", "list", "current", "show", "create", "delete",
-	"rename", "init", "migrate", "inject", "translate", "doctor", "env", "shell",
+	"rename", "init", "migrate", "inject", "exec", "translate", "doctor", "env", "shell",
 	"shell-init", "completion", "version", "help",
 }
 
@@ -179,8 +179,15 @@ func (a *App) completeCandidates(done []string, cur string) []string {
 		if wantFlags {
 			return []string{"--fix"}
 		}
-	case "inject":
+	case "inject", "exec":
+		targets := []string{"pod/", "docker:", "podman:"}
+		if cmd == "inject" {
+			targets = append(targets, "dir:")
+		}
 		if wantFlags {
+			if cmd == "exec" {
+				return []string{"--namespace", "--container"}
+			}
 			return []string{"--with-creds", "--with-refresh-token", "--dest",
 				"--namespace", "--container", "--dry-run"}
 		}
@@ -189,11 +196,11 @@ func (a *App) completeCandidates(done []string, cur string) []string {
 		}
 		if len(pos) == 1 {
 			if t, ok := firstTool(pos); ok {
-				return append(a.profileNames(t), "pod/", "docker:", "podman:", "dir:")
+				return append(a.profileNames(t), targets...)
 			}
 		}
 		if len(pos) == 2 {
-			return []string{"pod/", "docker:", "podman:", "dir:"}
+			return targets
 		}
 	case "init", "migrate":
 		if wantFlags {

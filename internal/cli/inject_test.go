@@ -13,30 +13,44 @@ import (
 	"github.com/tlrmchlsmth/claudectx/internal/keychain"
 )
 
-// fakeExec captures the transport command and unpacks the tar it received.
+// fakeExec captures every transport command: argv, raw stdin, and (when
+// stdin is a tar) the unpacked payload. bin/args/files mirror the last
+// call for the single-call inject tests.
+type execCall struct {
+	bin   string
+	args  []string
+	stdin []byte
+	files map[string][]byte
+}
+
 type fakeExec struct {
+	calls []execCall
 	bin   string
 	args  []string
 	files map[string][]byte
 	fail  error
+	// failAt makes fail apply only to the Nth call (1-based); 0 = every call.
+	failAt int
 }
 
 func (f *fakeExec) run(stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
-	f.bin, f.args = name, args
-	f.files = map[string][]byte{}
-	tr := tar.NewReader(stdin)
+	raw, _ := io.ReadAll(stdin)
+	call := execCall{bin: name, args: args, stdin: raw, files: map[string][]byte{}}
+	tr := tar.NewReader(strings.NewReader(string(raw)))
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if err != nil {
 			break
 		}
-		if err != nil {
-			return err
-		}
 		data, _ := io.ReadAll(tr)
-		f.files[hdr.Name] = data
+		call.files[hdr.Name] = data
 	}
-	return f.fail
+	f.calls = append(f.calls, call)
+	f.bin, f.args, f.files = call.bin, call.args, call.files
+	if f.failAt == 0 || len(f.calls) == f.failAt {
+		return f.fail
+	}
+	return nil
 }
 
 func injectHarness(t *testing.T) (*harness, *fakeExec) {
