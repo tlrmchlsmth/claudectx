@@ -186,10 +186,10 @@ func (a *App) completeCandidates(done []string, cur string) []string {
 		}
 		if wantFlags {
 			if cmd == "exec" {
-				return []string{"--namespace", "--container"}
+				return []string{"--namespace", "--container", "--extras"}
 			}
 			return []string{"--with-creds", "--with-refresh-token", "--dest",
-				"--namespace", "--container", "--dry-run"}
+				"--namespace", "--container", "--extras", "--dry-run"}
 		}
 		if len(pos) == 0 {
 			return tools()

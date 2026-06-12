@@ -159,8 +159,8 @@ passed as command-line arguments.
 | `claudectx delete <tool> <name>` | confirm, then move to `backups/` (never `rm -rf`) |
 | `claudectx rename <tool> <old> <new> [--force]` | rename (relinks if active) |
 | `eval "$(claudectx env <tool> <name>)"` / `claudectx shell …` | pin one terminal |
-| `claudectx inject <tool> [name] <target>` | copy a profile into a container (below) |
-| `claudectx exec <tool> [name] <target> [-- cmd]` | container session, credential in env only (below) |
+| `claudectx inject <tool> [name] <target> [--extras gh,kube]` | copy a profile into a container (below) |
+| `claudectx exec <tool> [name] <target> [--extras gh,kube] [-- cmd]` | container session, credential in env only (below) |
 | `claudectx translate <direction>` | convert config between the tools (below) |
 | `claudectx migrate` | upgrade a v1 paired-context install (below) |
 | `claudectx doctor [--fix]` | verify symlinks, perms, state consistency |
@@ -202,6 +202,24 @@ ends, there's nothing to find:
 ```sh
 claudectx exec claude work pod/foo -n dev     # config synced, then: claude
 claudectx exec claude pod/foo -- bash         # or any command
+```
+
+### Extra credentials
+
+Agents in containers usually need more than the agent's own login. `--extras`
+delivers host credentials for other tools alongside the profile:
+
+- **`gh`** — the GitHub CLI token (`gh auth token`), exported as
+  `GH_TOKEN`/`GITHUB_TOKEN`. Env-only: it rides the same session-scoped
+  handoff as the agent credential and never touches the target filesystem,
+  so it's available on the `exec` path only.
+- **`kube`** — the host kubeconfig (`$KUBECONFIG` first entry, else
+  `~/.kube/config`), installed as `~/.kube/config` (0600) in the container.
+  File-form: works on both `inject` and `exec`.
+
+```sh
+claudectx exec claude work podman:agent --extras gh -- claude
+claudectx inject claude work podman:agent --with-creds --extras kube
 ```
 
 For durable in-cluster use, prefer credentials that don't expire or rot: a

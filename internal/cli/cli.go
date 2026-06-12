@@ -49,10 +49,10 @@ Usage:
                                   print a tab-completion script
   claudectx inject <claude|codex> [profile] <pod/NAME|docker:NAME|podman:NAME|dir:PATH>
             [-n <namespace>] [-c <container>] [--dest <path>]
-            [--with-creds] [--with-refresh-token] [--dry-run]
+            [--with-creds] [--with-refresh-token] [--extras gh,kube] [--dry-run]
                                   copy a profile into a container's config dir
   claudectx exec <claude|codex> [profile] <pod/NAME|docker:NAME|podman:NAME>
-            [-n <namespace>] [-c <container>] [-- <command>...]
+            [-n <namespace>] [-c <container>] [--extras gh,kube] [-- <command>...]
                                   session in the container: config synced, the
                                   credential only in the session's env — never
                                   on the container filesystem

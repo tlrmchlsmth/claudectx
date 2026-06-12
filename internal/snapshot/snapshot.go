@@ -350,8 +350,15 @@ func (s *Snapshot) TotalBytes() int64 {
 // permission bits (credentials are 0600); parent directories are implied —
 // tar -x creates them.
 func (s *Snapshot) WriteTar(w io.Writer) error {
+	return WriteEntriesTar(w, s.Entries)
+}
+
+// WriteEntriesTar streams a bare entry list as a tar archive — the same
+// wire format WriteTar uses, for payloads that aren't profile snapshots
+// (extras like a kubeconfig).
+func WriteEntriesTar(w io.Writer, entries []Entry) error {
 	tw := tar.NewWriter(w)
-	for _, e := range s.Entries {
+	for _, e := range entries {
 		hdr := &tar.Header{
 			Name:    e.Rel,
 			Mode:    int64(e.Mode.Perm()),

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tlrmchlsmth/claudectx/internal/extras"
 	"github.com/tlrmchlsmth/claudectx/internal/snapshot"
 	"github.com/tlrmchlsmth/claudectx/internal/tool"
 )
@@ -33,13 +34,17 @@ func (a *App) runner() CmdRunner {
 
 const injectUsage = `usage: claudectx inject <claude|codex> [profile] <target>
           [-n <namespace>] [-c <container>] [--dest <path>]
-          [--with-creds] [--with-refresh-token] [--dry-run]
+          [--with-creds] [--with-refresh-token] [--extras gh,kube] [--dry-run]
 
 targets:
   pod/<name>       kubernetes pod (via kubectl exec)
   docker:<name>    docker container (via docker exec)
   podman:<name>    podman container (via podman exec)
-  dir:<path>       local directory (for mounts / devcontainers)`
+  dir:<path>       local directory (for mounts / devcontainers)
+
+--extras adds host credentials for other tools. File-form extras (kube: the
+host kubeconfig → ~/.kube/config) are delivered here; env-only extras (gh)
+cannot land as files — deliver those with claudectx exec --extras gh.`
 
 // injectTarget is a parsed delivery destination.
 type injectTarget struct {
@@ -87,6 +92,7 @@ func (a *App) cmdInject(args []string) error {
 		ctr, args = flagValue(args, "-c")
 	}
 	dest, args := flagValue(args, "--dest")
+	extrasSpec, args := flagValue(args, "--extras")
 	withRefresh := hasFlag(args, "--with-refresh-token")
 	withCreds := hasFlag(args, "--with-creds") || withRefresh
 	dryRun := hasFlag(args, "--dry-run")
@@ -124,6 +130,26 @@ func (a *App) cmdInject(args []string) error {
 	if withRefresh && t == tool.Codex {
 		fmt.Fprintln(a.Stderr, "note: --with-refresh-token only affects claude; codex auth.json travels whole under --with-creds")
 	}
+	var extraFiles []snapshot.Entry
+	if extrasSpec != "" {
+		if tgt.kind == "dir" {
+			return fmt.Errorf("--extras doesn't apply to dir: targets (extras land under the container's $HOME, not the config dir)")
+		}
+		providers, err := extras.Parse(extrasSpec, a.extrasDeps())
+		if err != nil {
+			return err
+		}
+		for _, p := range providers {
+			es, err := p.Files()
+			if err != nil {
+				return fmt.Errorf("extra %q: %w", p.Name(), err)
+			}
+			if len(es) == 0 {
+				fmt.Fprintf(a.Stderr, "note: extra %q is env-only and can't be injected as a file — deliver it with `claudectx exec ... --extras %s`\n", p.Name(), p.Name())
+			}
+			extraFiles = append(extraFiles, es...)
+		}
+	}
 
 	current := name == st.Axis(t).Current
 	snap, err := snapshot.Build(a.P, a.KC, t, name, current, snapshot.Options{
@@ -141,6 +167,9 @@ func (a *App) cmdInject(args []string) error {
 		fmt.Fprintf(a.Stdout, "would inject %s profile %q into %s (%s):\n", t, name, tgt, destLabel(t, dest))
 		for _, e := range snap.Entries {
 			fmt.Fprintf(a.Stdout, "  %s\n", e.Rel)
+		}
+		for _, e := range extraFiles {
+			fmt.Fprintf(a.Stdout, "  ~/%s (extra)\n", e.Rel)
 		}
 		a.reportInject(snap, withCreds)
 		return nil
@@ -164,6 +193,9 @@ func (a *App) cmdInject(args []string) error {
 		bin, argv := tgt.execArgv(ns, ctr, remoteScript(t, dest))
 		if err := a.runner()(&buf, a.Stderr, a.Stderr, bin, argv...); err != nil {
 			return fmt.Errorf("%s %s failed: %w (the target needs `sh` and `tar`)", bin, argv[0], err)
+		}
+		if err := a.sendExtraFiles(extraFiles, tgt, ns, ctr); err != nil {
+			return err
 		}
 	}
 
