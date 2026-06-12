@@ -24,8 +24,8 @@ func TestExecSessionTokenHandoff(t *testing.T) {
 		t.Error("exec must never write credentials to the container fs")
 	}
 
-	if string(handoff.stdin) != "sk-ant-oat01-x" {
-		t.Errorf("handoff stdin = %q, want the bare access token", handoff.stdin)
+	if string(handoff.stdin) != "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-x'\n" {
+		t.Errorf("handoff stdin = %q, want a sourceable KEY='value' line", handoff.stdin)
 	}
 	script := handoff.args[len(handoff.args)-1]
 	if !strings.Contains(script, "umask 077") || !strings.Contains(script, "/dev/shm") {
@@ -33,8 +33,8 @@ func TestExecSessionTokenHandoff(t *testing.T) {
 	}
 
 	sess := strings.Join(session.args, " ")
-	if !strings.Contains(sess, "export CLAUDE_CODE_OAUTH_TOKEN") || !strings.Contains(sess, "rm -f") {
-		t.Errorf("session script should export the env var and remove the handoff file: %s", sess)
+	if !strings.Contains(sess, `set -a; . "$f"`) || !strings.Contains(sess, "rm -f") {
+		t.Errorf("session script should source-export the handoff file and remove it: %s", sess)
 	}
 	if session.args[len(session.args)-1] != "claude" {
 		t.Errorf("default command should be the tool itself: %v", session.args)
@@ -96,11 +96,11 @@ func TestExecSessionCodexAPIKey(t *testing.T) {
 	h.mustRun(t, "exec", "codex", "podman:dev")
 	// default codex profile carries auth.json with OPENAI_API_KEY (testenv)
 	handoff := fe.calls[1]
-	if string(handoff.stdin) != "sk-test" {
-		t.Errorf("handoff stdin = %q, want the API key", handoff.stdin)
+	if string(handoff.stdin) != "OPENAI_API_KEY='sk-test'\n" {
+		t.Errorf("handoff stdin = %q, want a sourceable KEY='value' line", handoff.stdin)
 	}
 	session := fe.calls[2]
-	if !strings.Contains(strings.Join(session.args, " "), "export OPENAI_API_KEY") {
+	if !strings.Contains(strings.Join(session.args, " "), `set -a; . "$f"`) {
 		t.Errorf("session argv = %v", session.args)
 	}
 	cfg := fe.calls[0]

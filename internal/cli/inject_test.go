@@ -31,9 +31,14 @@ type fakeExec struct {
 	fail  error
 	// failAt makes fail apply only to the Nth call (1-based); 0 = every call.
 	failAt int
+	// stdout is written to the call's stdout, keyed by bin (`gh auth token`).
+	stdout map[string]string
 }
 
 func (f *fakeExec) run(stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+	if out, ok := f.stdout[name]; ok {
+		io.WriteString(stdout, out)
+	}
 	raw, _ := io.ReadAll(stdin)
 	call := execCall{bin: name, args: args, stdin: raw, files: map[string][]byte{}}
 	tr := tar.NewReader(strings.NewReader(string(raw)))
